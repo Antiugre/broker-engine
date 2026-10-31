@@ -1,0 +1,85 @@
+# 每日雲端運算（主跑）：下載快取 → 抓當日資料、增量更新 → 三套 Ultra 運算 → 上傳 Firestore → 更新快取
+# 兩台電腦（MandM、Nunu）改為備援：20:30 檢查雲端今天是否已完成，沒有才接手
+name: daily-pipeline
+
+on:
+  schedule:
+    - cron: "40 9 * * 1-5"        # 台灣時間 週一～五 17:40（GitHub 排程可能延遲數分鐘到數十分鐘）
+  workflow_dispatch:
+    inputs:
+      stocks:
+        description: "只算這些股票（空白 = Ultra 自選＋成交值前 N 名），例：2330 2317"
+        required: false
+      top:
+        description: "成交值前幾名"
+        required: false
+        default: "100"
+      date:
+        description: "指定日期 YYYY-MM-DD（空白 = 最近交易日）"
+        required: false
+      no_upload:
+        description: "只測試、不上傳 Firestore"
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: write                  # 更新 Release「cache」附件
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      TZ: Asia/Taipei
+      BB_DATA_DIR: ${{ github.workspace }}/data
+      BB_ROLE: cloud
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: 還原長期資料快取
+        run: |
+          gh release download cache --pattern data_cache.tar.gz --dir . --clobber || echo "尚無快取"
+          python tools/cache_bundle.py unpack --file data_cache.tar.gz
+
+      - name: Firebase 金鑰（來自 Secrets，不寫進 repo）
+        if: ${{ !inputs.no_upload }}
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+
+      - name: 執行 pipeline
+        run: |
+          ARGS="--wait-ready --max-hours 5"
+          [ -n "${{ inputs.stocks }}" ] && ARGS="$ARGS --stocks ${{ inputs.stocks }}"
+          [ -n "${{ inputs.top }}" ] && ARGS="$ARGS --top ${{ inputs.top }}"
+          [ -n "${{ inputs.date }}" ] && ARGS="$ARGS --date ${{ inputs.date }}"
+          [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
+          python pipeline.py $ARGS
+
+      - name: 更新長期資料快取
+        if: ${{ always() && !inputs.stocks }}
+        run: |
+          python tools/cache_bundle.py pack --out data_cache.tar.gz
+          gh release view cache >/dev/null 2>&1 || gh release create cache --title "data cache" --notes "長期資料快取（自動更新）" --prerelease
+          gh release upload cache data_cache.tar.gz --clobber
+
+      - name: 保留日誌
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
