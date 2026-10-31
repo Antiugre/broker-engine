@@ -1,0 +1,96 @@
+rules_version = '2';
+// 公開唯讀：任何人可以「讀取指定文件」，但不能列出集合、不能寫入。
+// Python 端使用 firebase-admin（服務帳戶）寫入，不受這些規則限制。
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /meta/{docId} {
+      allow get: if true;
+      allow list, write: if false;
+    }
+    match /days/{docId} {
+      allow get: if true;
+      allow list, write: if false;
+    }
+    match /hist/{docId} {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // 會員（MichaelH 登入）：只有本人能讀寫自己的 users/{uid} 與其下的畫線
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+    // 自選股上限：一般 5 檔、Ultra 10 檔（tier 本身只能經由正確序號或管理員設定，見下方）
+    //   縮減（移除）一律允許，避免等級被調降後無法刪減超出的自選
+    function watchlistOk() {
+      return !('watchlist' in request.resource.data)
+        || (request.resource.data.watchlist is list && (
+              request.resource.data.watchlist.size() <= 5
+              || (request.resource.data.get('tier', null) == 'ultra' && request.resource.data.watchlist.size() <= 10)
+              || (resource != null && resource.data.get('watchlist', []) is list
+                  && request.resource.data.watchlist.size() < resource.data.get('watchlist', []).size())));
+    }
+    // 會員升級：tier 只有在 upgradeCode 的 SHA-256 與正確序號相符時才能設為 "ultra"
+    // （序號本身不寫在任何地方，只存指紋；換序號＝換這串雜湊）
+    function validUpgrade() {
+      return request.resource.data.get('tier', null) == 'ultra'
+        && request.resource.data.get('upgradeCode', '') is string
+        && hashing.sha256(request.resource.data.get('upgradeCode', '')).toHexString().lower()
+           == 'd44db577867bfa95c3c121e2a75aa22caa461eced92468073f03ccc34281a5c7';
+    }
+    // 後台管理員：只認這個「已驗證」的 Email（Google 登入一律已驗證；用同 Email 註冊密碼帳號但未驗證者不算）
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email == 'spotify19850131@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+    match /users/{uid} {
+      allow read, delete: if isOwner(uid);
+      allow read: if isAdmin();                              // 後台：列出全部會員
+      allow update: if isAdmin()                             // 後台：只能改等級相關欄位
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['tier', 'tierBy', 'tierAt']);
+      allow create: if isOwner(uid) && watchlistOk() && !('role' in request.resource.data)
+        && (!('tier' in request.resource.data) || validUpgrade());
+      allow update: if isOwner(uid) && watchlistOk() && !('role' in request.resource.data)
+        && (request.resource.data.get('tier', null) == resource.data.get('tier', null) || validUpgrade());
+      match /drawings/{sid} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && request.resource.data.items is list
+          && request.resource.data.items.size() <= 200;
+      }
+    }
+
+    // Ultra 限定：分點勝率（quant）與跟單訊號（signals）
+    //   會員文件的 tier 只能經由正確序號或管理員設定（見上方），所以這裡讀它即可判斷等級
+    //   （每次讀取會多算 1 次 users/{uid} 讀取）
+    function isUltra() {
+      return request.auth != null
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('tier', null) == 'ultra';
+    }
+    match /quant/{docId} {
+      allow get: if isUltra() || isAdmin();
+      allow list, write: if false;
+    }
+    match /signals/{docId} {
+      allow get: if isUltra() || isAdmin();
+      allow list, write: if false;
+    }
+    match /edge/{docId} {            // Expectancy 引擎
+      allow get: if isUltra() || isAdmin();
+      allow list, write: if false;
+    }
+    match /flow/{docId} {            // Order Flow（每檔一份 + _index）
+      allow get: if isUltra() || isAdmin();
+      allow list, write: if false;
+    }
+    match /edge_hist/{docId} {
+      allow get: if isUltra() || isAdmin();
+      allow list, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
