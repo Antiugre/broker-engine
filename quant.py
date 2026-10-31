@@ -315,6 +315,12 @@ def _listed(sid: str, day: str) -> dict[str, dict]:
     k = (sid, day)
     if k not in _day_cache:
         out = {}
+        try:  # 全分點反查（sweep.py）掃到的當日張數；個股頁有的以個股頁為準（下面覆蓋）
+            import sweep
+            for k, r in sweep.day_rows(sid, day).items():
+                out[k] = {"date": day, "buy": int(r["buy"] or 0), "sell": int(r["sell"] or 0)}
+        except Exception:  # noqa: BLE001
+            pass
         try:
             rec = json.loads((DATA_DIR / day / f"{sid}.json").read_text(encoding="utf-8"))
             for side in ("buy_side", "sell_side"):
@@ -466,6 +472,15 @@ def candidates(day: str, stocks: list[str], n_days: int = 3) -> dict[str, dict[s
                 for row in rec.get(side, []):
                     if row.get("b_raw") and row.get("broker_id"):
                         out.setdefault(sid, {}).setdefault(history_key(row), {**row, "stock_name": rec.get("stock_name")})
+    # 前 15 名以外：全分點反查找到、且已建好 5 年明細的分點（sweep.py）
+    try:
+        import sweep
+        names = {s: next(iter(v.values())).get("stock_name") for s, v in out.items() if v}
+        for sid, rows in sweep.engine_extras(day, stocks or list(out), n_days).items():
+            for k, r in rows.items():
+                out.setdefault(sid, {}).setdefault(k, {**r, "stock_name": names.get(sid)})
+    except Exception as ex:  # noqa: BLE001
+        log.warning("額外分點讀取失敗：%s", ex)
     return out
 
 

@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 import scraper  # noqa: E402
 
 log = logging.getLogger("broker_scraper")
+SWEEP_SLOT = 45 * 60   # --max-hours 時保留給全分點反查與額外分點建檔的秒數
 READY_HOUR = 17  # 17:00 以後視為「今天的盤後資料應該要出來了」
 
 
@@ -110,6 +111,7 @@ def main(argv=None) -> int:
     ap.add_argument("--top", type=int, help="成交值前幾名（預設 local_settings.json 的 top_n，100）")
     ap.add_argument("--failover", action="store_true",
                     help="備援模式（Nunu）：主機今天已上傳就直接結束；local_settings.json 的 role=backup 也會開啟")
+    ap.add_argument("--no-sweep", action="store_true", help="略過全分點反查（前 15 名以外的分點）")
     ap.add_argument("--max-hours", type=float, help="最多跑幾小時（建檔時分批用；超時就停，下次接著跑）")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -121,7 +123,8 @@ def main(argv=None) -> int:
     quant.MAX_AGE_DAYS = 7                     # 沒上榜的分點約每週向富邦補一次；上榜的直接用排行頁張數
     if args.max_hours:
         quant.DEADLINE = time.time() + args.max_hours * 3600
-        scraper.DEADLINE = quant.DEADLINE
+        # 前 15 名下載先停，留一段時間給「全分點反查」（約 30～40 分鐘）與額外分點建檔
+        scraper.DEADLINE = quant.DEADLINE - (SWEEP_SLOT if args.max_hours >= 2 and not args.no_sweep else 0)
 
     db = None
     if not args.dry_run:  # --no-upload（建檔）也要讀 Ultra 會員自選，只是不寫入
@@ -191,6 +194,16 @@ def _run(args, target, db, paths, log_path) -> int:
         if not day:
             log.error("data/ 中沒有資料可上傳")
             return 1
+        # 1.2) 全分點反查：補上前 15 名以外的分點，並替其中淨買賣較大的建立 5 年明細（時間不夠就下次續跑）
+        if not args.upload_only and not args.no_sweep:
+            try:
+                import quant
+                import sweep
+                end = quant.DEADLINE
+                sweep.run(day, until=end - 10 * 60 if end else None)
+                sweep.warm(day, stocks, until=end)
+            except Exception:  # noqa: BLE001
+                log.exception("全分點反查失敗（不影響其他步驟）")
         # 1.5) 分點勝率與跟單訊號（失敗不影響主資料上傳）
         if not args.no_quant:
             try:
