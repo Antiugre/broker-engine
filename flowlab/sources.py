@@ -2,6 +2,7 @@
 flowlab.sources — Extract：從本機快取組出 StockContext
 
   分點宇宙   近 60 個有資料日的買超／賣超前 15 名 ∪ 近 20 日區間合計的買／賣前 15 名
+             ∪ 全分點反查（sweep.py）找到、已建好明細的額外分點
   分點明細   quant.load_branch_history（約 5 年快取，每天只補最近幾天）
   個股行情   quant.load_prices（成交均價、收盤價、成交張數）
   公司地址   證交所／櫃買 OpenAPI 公司基本資料（本機快取 7 天）→ 地緣比對
@@ -42,6 +43,12 @@ def universe(fetcher, sid: str, day: str, lookback_days: int = 60, range_days: i
             for row in rec.get(side, []):
                 if row.get("b_raw") and row.get("broker_id"):
                     out.setdefault(history_key(row), {**row, "stock_name": rec.get("stock_name")})
+    try:  # 前 15 名以外：全分點反查找到、已建好 5 年明細的分點
+        import sweep
+        for k, r in sweep.engine_extras(day, [sid]).get(sid, {}).items():
+            out.setdefault(k, r)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("[%s] 額外分點讀取失敗：%s", sid, ex)
     if fetcher is not None:
         try:
             rec = quant.range_record(fetcher, sid, day, range_days)
