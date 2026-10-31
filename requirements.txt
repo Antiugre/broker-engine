@@ -1,0 +1,11 @@
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+# 分點評分 Expectancy 引擎（quant_edge.py）
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10  # 選用：貝氏可信區間精確值（沒有時改用常態近似）
+# 上傳 Firebase（pipeline.py）
+firebase-admin>=6.5
+# 選用：網站擋 requests 時才需要（pip install playwright && python -m playwright install chromium）
+# playwright>=1.47

@@ -1,0 +1,23 @@
+# 機密：Firebase 服務帳戶金鑰（只放本地電腦）
+secrets/*
+!secrets/README.txt
+*.serviceAccount.json
+*-firebase-adminsdk-*.json
+
+# 本地資料與輸出
+.venv/
+__pycache__/
+data/*
+!data/.gitkeep
+logs/
+out/
+.shortcut_done
+舊版腳本/
+
+# 前端
+web/node_modules/
+web/dist/
+web/.env
+web/.env.local
+web/.vercel
+local_settings.json
