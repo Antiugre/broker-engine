@@ -230,6 +230,7 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
                    "params": q.get("params", {}), "updated": q.get("updated")}
             if is_latest:
                 docs[f"quant/latest@{h}"] = {"date": date, "horizon": h, "schema": SCHEMA, "params": q.get("params", {}),
+                                             "rdates": hq.get("rdates", []),  # 近 180 交易日（網頁自訂「近 N 日」用）
                                              "payload": encode(hq.get("stocks", {}))}
                 docs[f"signals/latest@{h}"] = sig
             docs[f"signals/{date}@{h}"] = sig  # 每日存檔，日後可回測訊號的後續表現

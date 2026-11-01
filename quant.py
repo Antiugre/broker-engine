@@ -259,8 +259,29 @@ def detect_signal(perf: dict, rows: list[dict], open_lots: list[Lot], recent_dat
             "first_buy": min((l.date for l in open_lots if l.date in recent), default=None)}
 
 
+SERIES_DAYS = 180   # 網頁上「近 N 日買超」可自訂的上限（交易日）
+
+
+def recent_series(rows: list[dict], open_lots: list[Lot], dates: list[str]) -> list[list]:
+    """近 SERIES_DAYS 個交易日、有進出或仍有庫存的日子：[[日期, 淨買超張, 該日買進仍未出場張], …]
+    網頁依使用者輸入的天數 N 加總最後 N 天，重算「近 N 日大額買超且未出場」訊號"""
+    window = set(dates[-SERIES_DAYS:])
+    by_date = {r["date"]: r for r in rows if r["date"] in window}
+    held: dict[str, float] = {}
+    for l in open_lots:
+        if l.date in window:
+            held[l.date] = held.get(l.date, 0) + l.qty
+    out = []
+    for d in sorted(set(by_date) | set(held)):
+        r = by_date.get(d, {})
+        net = (r.get("buy") or 0) - (r.get("sell") or 0)
+        if net or held.get(d):
+            out.append([d, round(net), round(held.get(d, 0))])
+    return out
+
+
 def evaluate(rows: list[dict], prices: dict[str, float], recent_dates: list[str], last_price: float | None,
-             p: Params = DEFAULT) -> dict:
+             p: Params = DEFAULT, series_dates: list[str] | None = None) -> dict:
     """單一（股票, 分點）的完整評估"""
     m = fifo_match(rows, prices, p)
     perf = performance(m.trades)
@@ -268,7 +289,12 @@ def evaluate(rows: list[dict], prices: dict[str, float], recent_dates: list[str]
     sig = detect_signal(perf, rows, m.open_lots, recent_dates, p)
     high = (perf["trades"] >= p.min_trades and perf["win_rate"] is not None
             and perf["win_rate"] > p.win_rate_min and (perf["avg_ret"] or 0) > 0)
-    return {**perf, **unr, "high": high, "signal": sig,
+    extra = {}
+    if high and series_dates:  # 只替高勝率分點附上近 180 日序列（網頁自訂天數用），控制檔案大小
+        active_buys = [r["buy"] for r in rows if (r.get("buy") or 0) > 0]
+        extra = {"series": recent_series(rows, m.open_lots, series_dates),
+                 "typical": round(statistics.median(active_buys), 2) if active_buys else 0}
+    return {**perf, **unr, **extra, "high": high, "signal": sig,
             "unmatched_sell": round(m.unmatched_sell), "intraday": round(m.intraday),
             "first_date": rows[0]["date"] if rows else None, "last_date": rows[-1]["date"] if rows else None,
             "recent_trades": [asdict(t) for t in m.trades[-12:]]}
@@ -496,6 +522,7 @@ def compact(stats: dict) -> dict:
         "ol": stats["open_lots"], "oc": stats["open_cost"], "os": stats["open_since"],
         "lp": stats["last_price"], "upnl": stats["unrealized_pnl"], "ur": r4(stats["unrealized_ret"]),
         "um": stats["unmatched_sell"], "from": stats["first_date"],
+        **({"rs": stats["series"], "typ": stats["typical"]} if stats.get("series") is not None else {}),
     }
 
 
@@ -510,6 +537,7 @@ def run(day: str, stocks: list[str], fetcher=None, p: Params = DEFAULT, progress
     result = {"date": day, "params": asdict(p), "horizons": {h: {"stocks": {}, "signals": []} for h in HORIZONS},
               "updated": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
     t0 = time.time()
+    cal: list[str] = []   # 近 SERIES_DAYS 個交易日（取資料最完整的一檔）
     try:
         for sid, branches in cands.items():
             try:
@@ -521,6 +549,8 @@ def run(day: str, stocks: list[str], fetcher=None, p: Params = DEFAULT, progress
             prices = {d: (v.get("vwap") or v.get("close")) for d, v in prices_raw.items() if v.get("vwap") or v.get("close")}
             last_price = next((prices_raw[d].get("close") for d in reversed(dates) if prices_raw[d].get("close")), None)
             recent = dates[-p.signal_days:]
+            if len(dates) > len(cal):
+                cal = dates[-SERIES_DAYS:]
             per_stock = {h: {} for h in HORIZONS}
             for i, (key, row) in enumerate(branches.items(), 1):
                 if progress:
@@ -534,14 +564,17 @@ def run(day: str, stocks: list[str], fetcher=None, p: Params = DEFAULT, progress
                     sub = clip_rows(rows, day, h)
                     if not sub:
                         continue
-                    st = evaluate(sub, prices, recent, last_price, p)
+                    st = evaluate(sub, prices, recent, last_price, p, series_dates=dates)
                     per_stock[h][key] = {"broker": row.get("broker"), "branch_id": row.get("branch_id"), **compact(st)}
+                    if st.get("series") is not None:  # 網頁自行組訊號卡片時需要的欄位
+                        per_stock[h][key].update({"bi": row.get("broker_id"), "br": row.get("b_raw"), "sn": row.get("stock_name"),
+                                                  "ct": row.get("city"), "ds": row.get("district")})
                     if st["signal"]:
                         result["horizons"][h]["signals"].append({
                             "stock_id": sid, "stock_name": row.get("stock_name"), "key": key,
                             "broker": row.get("broker"), "broker_id": row.get("broker_id"), "b_raw": row.get("b_raw"),
                             "branch_id": row.get("branch_id"), "city": row.get("city"), "district": row.get("district"),
-                            **compact(st), **st["signal"],
+                            **{k: v for k, v in compact(st).items() if k not in ("rs", "typ")}, **st["signal"],
                         })
             for h in HORIZONS:
                 result["horizons"][h]["stocks"][sid] = per_stock[h]
@@ -549,6 +582,7 @@ def run(day: str, stocks: list[str], fetcher=None, p: Params = DEFAULT, progress
         if own:
             fetcher.close()
     for h in HORIZONS:
+        result["horizons"][h]["rdates"] = cal
         result["horizons"][h]["signals"].sort(key=lambda s: (-(s["wr"] or 0), -(s["ar"] or 0)))
     result.update(result["horizons"][DEFAULT_HORIZON])  # 頂層 stocks / signals = 預設範圍（相容舊用法）
     _write(QUANT_DIR / f"{day}.json", result)
