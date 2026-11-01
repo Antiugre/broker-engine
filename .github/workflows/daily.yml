@@ -80,7 +80,7 @@ jobs:
           python pipeline.py $ARGS
 
       - name: 更新長期資料快取
-        if: ${{ always() && !inputs.stocks }}
+        if: ${{ always() }}   # 指定股票或中途取消也保存（下次不必重抓）
         run: |
           python tools/cache_bundle.py pack --out data_cache.tar.gz
           gh release view cache >/dev/null 2>&1 || gh release create cache --title "data cache" --notes "長期資料快取（自動更新）" --prerelease
