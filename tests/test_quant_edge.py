@@ -100,10 +100,10 @@ def test_dynamic_threshold_amount_or_volume_share():
 
 
 def test_stealth_accumulation_detects_quiet_buyer_and_rejects_spike():
-    d = cal(20)
+    d = cal(30)                                                          # 窗口 30 日
     quiet = [{"date": x, "buy": 60 + (i % 3) * 5, "sell": 5} for i, x in enumerate(d) if i % 5 != 4]
-    s = qe.stealth(qe.build_frame(quiet, prices(d, lambda i: 100 + i * 0.3, vol=2_000)))
-    assert s["flag"] and s["buy_days"] == 16 and s["day_share"] <= 0.05
+    s = qe.stealth(qe.build_frame(quiet, prices(d, lambda i: 100 + i * 0.2, vol=2_000)))
+    assert s["flag"] and s["buy_days"] == 24 and s["day_share"] <= 0.05
     spike = [{"date": d[-1], "buy": 900, "sell": 0}] + [{"date": x, "buy": 3, "sell": 0} for x in d[:-1]]
     s2 = qe.stealth(qe.build_frame(spike, prices(d, vol=2_000)))
     assert not s2["flag"] and not s2["checks"]["day_share"] and not s2["checks"]["top_day"]
@@ -151,3 +151,28 @@ def test_run_end_to_end(tmp_path, monkeypatch):
     assert st["edge"] and st["signal"] and out["signals"][0]["key"] == "9268"
     assert (tmp_path / "edge" / f"{day}.json").exists()
     json.loads((tmp_path / "edge" / f"{day}.json").read_text())   # 可序列化（numpy 型別已轉換）
+
+
+def test_loaded_detects_finished_accumulation_waiting_to_launch():
+    d = cal(60)
+    px = prices(d, 50, vol=4_000)
+    # 第 30～50 日斷斷續續買（中間有空檔），之後 9 天不動 → 建倉完成、等待發動
+    rows = [{"date": d[i], "buy": 300, "sell": 0} for i in range(30, 51) if i % 4 != 1]
+    df = qe.build_frame(rows, px)
+    trades, remaining, _ = qe.match_inventory(df, "lifo")
+    L = qe.loaded(df, remaining)
+    assert L["flag"] and L["lots"] == 300 * 16 and L["hold"] == pytest.approx(1.0) and L["quiet"] == 0
+    assert L["quiet_days"] == 9 and L["gap"] == pytest.approx(50 / 50.1 - 1, abs=1e-3)   # 買價含 1 檔滑價（50 元一檔 0.1）
+    # 最近還在大買 → 不算「安靜」（交給近 3 日訊號）
+    busy = rows + [{"date": d[-1], "buy": 900, "sell": 0}]
+    df2 = qe.build_frame(busy, px)
+    assert not qe.loaded(df2, qe.match_inventory(df2, "lifo")[1])["checks"]["quiet"]
+    # 已經拉開（收盤高於成本 20%）→ 不算等待
+    up = prices(d, lambda i: 50 if i < 55 else 60, vol=4_000)
+    df3 = qe.build_frame(rows, up)
+    L3 = qe.loaded(df3, qe.match_inventory(df3, "lifo")[1])
+    assert not L3["flag"] and not L3["checks"]["gap"]
+    # 邊買邊倒：賣掉大半 → 持有率不足
+    dump = rows + [{"date": d[52], "buy": 0, "sell": 3_500}]
+    df4 = qe.build_frame(dump, px)
+    assert not qe.loaded(df4, qe.match_inventory(df4, "lifo")[1])["checks"]["hold"]
