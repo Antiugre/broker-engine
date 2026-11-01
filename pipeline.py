@@ -205,15 +205,28 @@ def _run(args, target, db, paths, log_path) -> int:
             except Exception:  # noqa: BLE001
                 log.exception("全分點反查失敗（不影響其他步驟）")
         # 1.5) 分點勝率與跟單訊號（失敗不影響主資料上傳）
+        #      每算完一套就先上傳：Hit Ratio 只要幾秒，不必等 Expectancy／Order Flow（要上富邦補資料，可能很久）
+        def stage_upload(name: str) -> None:
+            if args.no_upload or args.dry_run:
+                return
+            try:
+                import firebase_upload
+                r = firebase_upload.upload(day, stocks)
+                log.info("%s 算完先上傳：寫入 %d 份", name, len(r["written"]))
+            except Exception:  # noqa: BLE001
+                log.exception("%s 先行上傳失敗（最後會再整批上傳一次）", name)
+
         if not args.no_quant:
             try:
                 import quant
                 quant.run(day, stocks)
+                stage_upload("Hit Ratio")
             except Exception:  # noqa: BLE001
                 log.exception("分點勝率計算失敗（主資料照常上傳）")
             try:
                 import quant_edge
                 quant_edge.run(day, stocks)
+                stage_upload("Expectancy")
             except Exception:  # noqa: BLE001
                 log.exception("Expectancy 計算失敗（主資料照常上傳）")
             try:
