@@ -1,10 +1,10 @@
 # 每日雲端運算（主跑）：下載快取 → 抓當日資料、增量更新 → 三套 Ultra 運算 → 上傳 Firestore → 更新快取
-# 兩台電腦（MandM、Nunu）改為備援：20:30 檢查雲端今天是否已完成，沒有才接手
+# 主跑：MandM 每晚 18:30（Windows 工作排程）；雲端 23:00 只做備援
 name: daily-pipeline
 
 on:
   schedule:
-    - cron: "40 9 * * 1-5"        # 台灣時間 週一～五 17:40（GitHub 排程可能延遲數分鐘到數十分鐘）
+    - cron: "0 15 * * 1-5"        # 台灣時間 週一～五 23:00：備援（MandM 主跑 18:30；今天已完成或正在跑就直接結束）
   workflow_dispatch:
     inputs:
       stocks:
@@ -71,6 +71,8 @@ jobs:
       - name: 執行 pipeline
         run: |
           ARGS="--wait-ready --max-hours 5"
+          # 排程＝備援：MandM 今天已上傳或正在跑就結束；接手時只算雲端快取裡已建好的股票（不在雲端做初次建檔）
+          [ "${{ github.event_name }}" = "schedule" ] && ARGS="$ARGS --failover --only-cached"
           [ -n "${{ inputs.stocks }}" ] && ARGS="$ARGS --stocks ${{ inputs.stocks }}"
           [ -n "${{ inputs.top }}" ] && ARGS="$ARGS --top ${{ inputs.top }}"
           [ -n "${{ inputs.date }}" ] && ARGS="$ARGS --date ${{ inputs.date }}"
