@@ -9,6 +9,7 @@
   universe/            每日運算範圍、Ultra 自選匯總
   最近 70 個交易日的 data/<日期>/<代號>.json   （候選分點與排行頁張數）
   brokers.json、company_info.json               （分點／公司所在地）
+  最近一天的 quant/、edge/、flow/ 運算結果          （上傳失敗時可只補傳）
 """
 from __future__ import annotations
 
@@ -35,6 +36,13 @@ def pack(out: Path) -> Path:
             for f in d.glob("*.json"):
                 if not f.name.startswith("_"):
                     tar.add(f, arcname=f"{d.name}/{f.name}")
+        # 最近一天的運算結果（Hit Ratio／Expectancy／Order Flow）：上傳失敗時可用 --upload-only 補傳，不必重算
+        if days:
+            last = days[-1].name
+            for rel in (f"quant/{last}.json", f"edge/{last}.json", f"flow/{last}"):
+                p = DATA_DIR / rel
+                if p.exists():
+                    tar.add(p, arcname=rel)
     print(f"打包完成：{out}（{out.stat().st_size / 1e6:.1f} MB，{len(days)} 個交易日）")
     return out
 
