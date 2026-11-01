@@ -328,7 +328,12 @@ HOT_MAX_AGE = 3      # 20 日區間榜上的分點（可能是緩步建倉）較
 DEADLINE: float | None = None   # pipeline --max-hours：超過就不再向富邦抓（已快取的照常計算）
 
 
+HEARTBEAT = None   # pipeline 設定：長時間運算中定期回報「還在跑」（讓備援機知道不要接手）
+
+
 def check_deadline():
+    if HEARTBEAT is not None:
+        HEARTBEAT()
     if DEADLINE is not None and time.time() > DEADLINE:
         raise TimeoutError("已達本次執行時間上限，剩下的下次再補")
 _day_cache: dict[tuple[str, str], dict[str, dict]] = {}

@@ -81,6 +81,33 @@ def encode(obj) -> bytes:
     return gzip.compress(raw, compresslevel=9, mtime=0)  # mtime=0 → 內容相同時位元組相同，雜湊才穩定
 
 
+DOC_PAYLOAD_LIMIT = 950_000   # Firestore 單一文件上限 1 MiB，留一點給其他欄位
+
+
+def encode_fit(stocks: dict, label: str = "") -> bytes:
+    """壓縮後超過單一文件上限時，從排序較後面的股票開始拿掉「近 180 日進出序列」（rs／typ），直到放得下"""
+    blob = encode(stocks)
+    if len(blob) <= DOC_PAYLOAD_LIMIT:
+        return blob
+    stocks = json.loads(json.dumps(stocks))
+    for sid in reversed(list(stocks)):
+        def strip(o):
+            if isinstance(o, dict):
+                o.pop("rs", None); o.pop("typ", None)
+                for v in o.values():
+                    strip(v)
+            elif isinstance(o, list):
+                for v in o:
+                    strip(v)
+        strip(stocks[sid])
+        blob = encode(stocks)
+        if len(blob) <= DOC_PAYLOAD_LIMIT:
+            log.warning("%s 壓縮後太大：拿掉部分股票的近 N 日序列（從 %s 起）才放得下（%d bytes）", label, sid, len(blob))
+            return blob
+    log.warning("%s 拿掉全部序列後仍有 %d bytes", label, len(blob))
+    return blob
+
+
 def decode(blob: bytes):
     return json.loads(gzip.decompress(blob).decode("utf-8"))
 
@@ -231,7 +258,7 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
             if is_latest:
                 docs[f"quant/latest@{h}"] = {"date": date, "horizon": h, "schema": SCHEMA, "params": q.get("params", {}),
                                              "rdates": hq.get("rdates", []),  # 近 180 交易日（網頁自訂「近 N 日」用）
-                                             "payload": encode(hq.get("stocks", {}))}
+                                             "payload": encode_fit(hq.get("stocks", {}), f"quant/latest@{h}")}
                 docs[f"signals/latest@{h}"] = sig
             docs[f"signals/{date}@{h}"] = sig  # 每日存檔，日後可回測訊號的後續表現
 

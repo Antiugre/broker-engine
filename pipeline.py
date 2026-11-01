@@ -96,6 +96,9 @@ def latest_local_date() -> str | None:
     return days[-1] if days else None
 
 
+BEAT_FRESH = 45 * 60   # 「正在執行」回報多久內有效（秒）
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="下載 → 清洗 → 上傳 Firebase")
     ap.add_argument("--date", help="YYYY-MM-DD（預設：今天；17:00 前為前一交易日）")
@@ -113,6 +116,8 @@ def main(argv=None) -> int:
                     help="備援模式（Nunu）：主機今天已上傳就直接結束；local_settings.json 的 role=backup 也會開啟")
     ap.add_argument("--no-sweep", action="store_true", help="略過全分點反查（前 15 名以外的分點）")
     ap.add_argument("--max-hours", type=float, help="最多跑幾小時（建檔時分批用；超時就停，下次接著跑）")
+    ap.add_argument("--only-cached", action="store_true",
+                    help="只算已建好 5 年資料的股票（雲端備援用：不在雲端做耗時的初次建檔）")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -134,34 +139,69 @@ def main(argv=None) -> int:
         except Exception as ex:  # noqa: BLE001
             log.warning("無法連線 Firestore（%s）：略過 Ultra 自選與備援檢查", ex)
 
-    # 0) 備援（Nunu）：主機（MandM）今天已完成就不重複跑
+    import socket
+    me = socket.gethostname()
+    # 0) 備援（雲端／另一台）：主機（MandM）今天已完成、或正在跑（45 分鐘內有回報），就不重複跑
     if (args.failover or paths.ROLE == "backup") and not args.no_upload and db is not None:
         meta = (db.collection("meta").document("latest").get().to_dict() or {})
         if meta.get("pc_done") == target.isoformat():
             log.info("主機 %s 已完成 %s 的運算與上傳，備援機不執行", meta.get("pc_host"), target)
             return 0
+        run = (db.collection("meta").document("running").get().to_dict() or {})
+        if run.get("host") != me and time.time() - float(run.get("t") or 0) < BEAT_FRESH:
+            log.info("主機 %s 正在執行（%s 開始，最後回報 %s），備援機不執行", run.get("host"), run.get("started"), run.get("at"))
+            return 0
         log.info("主機今天尚未完成（最後 %s），備援機接手", meta.get("pc_done"))
 
-    # 0.5) 兩台電腦共用資料夾：另一台正在跑就不重疊執行（鎖檔 6 小時內有效）
-    import socket
+    # 0.5) 不重疊執行：任何一台（含本機的另一個排程）45 分鐘內有回報就視為正在跑
     lock = paths.DATA_DIR / "_running.json"
-    me = socket.gethostname()
     try:
         cur = json.loads(lock.read_text(encoding="utf-8"))
-        if cur.get("host") != me and time.time() - cur.get("t", 0) < 6 * 3600:
-            log.info("%s 正在執行（%s 開始），本機不重疊執行", cur.get("host"), cur.get("started"))
+        if time.time() - cur.get("t", 0) < BEAT_FRESH:
+            log.info("%s 正在執行（%s 開始），不重疊執行", cur.get("host"), cur.get("started"))
             return 0
     except Exception:  # noqa: BLE001
         pass
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.write_text(json.dumps({"host": me, "t": time.time(), "started": dt.datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
+    started = dt.datetime.now().isoformat(timespec="seconds")
+    last = [0.0]
+
+    def beat(stage: str | None = None, force: bool = False) -> None:
+        """「還在跑」回報：本機鎖檔＋Firestore meta/running（最多每分鐘一次）"""
+        now = time.time()
+        if not force and now - last[0] < 60:
+            return
+        last[0] = now
+        info = {"host": me, "t": now, "started": started, "day": target.isoformat(),
+                "at": dt.datetime.now().isoformat(timespec="seconds"), **({"stage": stage} if stage else {})}
+        try:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            lock.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+        if db is not None and not args.no_upload and not args.dry_run:
+            try:
+                db.collection("meta").document("running").set(info)
+            except Exception:  # noqa: BLE001
+                pass
+
+    import quant
+    quant.HEARTBEAT = beat
+    beat("開始", force=True)
     try:
-        return _run(args, target, db, paths, log_path)
+        return _run(args, target, db, paths, log_path, beat)
     finally:
+        quant.HEARTBEAT = None
         lock.unlink(missing_ok=True)
+        if db is not None and not args.no_upload and not args.dry_run:
+            try:
+                cur = db.collection("meta").document("running").get().to_dict() or {}
+                if cur.get("host") == me and cur.get("started") == started:
+                    db.collection("meta").document("running").delete()
+            except Exception:  # noqa: BLE001
+                pass
 
 
-def _run(args, target, db, paths, log_path) -> int:
+def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
     # 1) 今天要算哪些股票：Ultra 會員自選 → 成交值前 N 名
     if args.stocks:
         stocks = args.stocks
@@ -173,6 +213,11 @@ def _run(args, target, db, paths, log_path) -> int:
             log.info("全市場日檔補進 %d 檔的價格快取（不必逐檔抓）", n)
         stocks = universe.build(target.isoformat(), db, market,
                                 args.top if args.top is not None else paths.TOP_N)["stocks"]
+        if args.only_cached:
+            import quant
+            have = {p.parent.name for p in quant.LONG_DIR.glob("*/_prices.json")}
+            log.info("只算已建檔的股票：%d → %d 檔", len(stocks), len([s for s in stocks if s in have]))
+            stocks = [s for s in stocks if s in have]
     if not stocks:
         log.error("今天沒有要計算的股票（讀不到 Ultra 自選，也拿不到全市場成交值排行）")
         return 1
@@ -184,7 +229,7 @@ def _run(args, target, db, paths, log_path) -> int:
             if args.wait_ready and not wait_until_ready(target, "2330", args.tries, args.interval):  # 用台積電判斷資料是否已更新
                 return 0
             res = scraper.run_job(stocks, target, min_delay=1.5, max_delay=3.5, skip_existing=not args.force,
-                                  progress=lambda st, m, d, t: log.info(m) if st == "stock" else None)
+                                  progress=lambda st, m, d, t: (log.info(m), beat(m)) if st == "stock" else None)
             if not res["ok"] and not res["skipped"]:
                 log.error("全部下載失敗：%s", res["failed"])
                 return 1
@@ -200,6 +245,7 @@ def _run(args, target, db, paths, log_path) -> int:
                 import quant
                 import sweep
                 end = quant.DEADLINE
+                beat("全分點反查", force=True)
                 sweep.run(day, until=end - 10 * 60 if end else None)
                 sweep.warm(day, stocks, until=end)
             except Exception:  # noqa: BLE001
@@ -219,18 +265,21 @@ def _run(args, target, db, paths, log_path) -> int:
         if not args.no_quant:
             try:
                 import quant
+                beat("Hit Ratio", force=True)
                 quant.run(day, stocks)
                 stage_upload("Hit Ratio")
             except Exception:  # noqa: BLE001
                 log.exception("分點勝率計算失敗（主資料照常上傳）")
             try:
                 import quant_edge
+                beat("Expectancy", force=True)
                 quant_edge.run(day, stocks)
                 stage_upload("Expectancy")
             except Exception:  # noqa: BLE001
                 log.exception("Expectancy 計算失敗（主資料照常上傳）")
             try:
                 import flowlab
+                beat("Order Flow", force=True)
                 flowlab.run(day, stocks)
             except Exception:  # noqa: BLE001
                 log.exception("Order Flow 計算失敗（主資料照常上傳）")
