@@ -21,6 +21,10 @@ on:
         description: "只測試、不上傳 Firestore"
         type: boolean
         default: false
+      upload_only:
+        description: "只補上傳（不重新下載與運算；用於上一次運算完成但上傳失敗）"
+        type: boolean
+        default: false
 
 concurrency:
   group: daily-pipeline
@@ -67,6 +71,7 @@ jobs:
           [ -n "${{ inputs.top }}" ] && ARGS="$ARGS --top ${{ inputs.top }}"
           [ -n "${{ inputs.date }}" ] && ARGS="$ARGS --date ${{ inputs.date }}"
           [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
+          [ "${{ inputs.upload_only }}" = "true" ] && ARGS="--upload-only --no-quant $([ -n "${{ inputs.date }}" ] && echo --date ${{ inputs.date }})"
           python pipeline.py $ARGS
 
       - name: 更新長期資料快取
