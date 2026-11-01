@@ -108,6 +108,42 @@ def encode_fit(stocks: dict, label: str = "") -> bytes:
     return blob
 
 
+def split_payload(stocks: dict, limit: int | None = None) -> list[bytes]:
+    """{代號: …} 壓縮後超過單一文件上限 → 依股票順序切成多份，每份都 ≤ 上限（網站依 parts 依序讀回合併）"""
+    limit = limit or DOC_PAYLOAD_LIMIT
+    whole = encode(stocks)
+    if len(whole) <= limit:
+        return [whole]
+    sizes = {s: len(encode({s: v})) for s, v in stocks.items()}
+    parts, cur, size = [], {}, 0
+    for s, v in stocks.items():
+        if cur and size + sizes[s] > limit * 0.9:
+            parts.append(cur)
+            cur, size = {}, 0
+        cur[s] = v
+        size += sizes[s]
+    if cur:
+        parts.append(cur)
+    out = []
+    for part in parts:
+        blob = encode(part)
+        if len(blob) > limit and len(part) > 1:   # 估計失準：再對半切
+            items = list(part.items())
+            out += split_payload(dict(items[: len(items) // 2]), limit) + split_payload(dict(items[len(items) // 2:]), limit)
+        else:
+            out.append(encode_fit(part, "單一股票") if len(blob) > limit else blob)
+    return out
+
+
+def payload_docs(base_id: str, fields: dict, stocks: dict) -> dict[str, dict]:
+    """→ {base_id: {…fields, parts, payload}, base_id~1: {part, payload}, …}"""
+    blobs = split_payload(stocks)
+    docs = {base_id: {**fields, "parts": len(blobs), "payload": blobs[0]}}
+    for k, blob in enumerate(blobs[1:], 1):
+        docs[f"{base_id}~{k}"] = {"date": fields.get("date"), "horizon": fields.get("horizon"), "part": k, "payload": blob}
+    return docs
+
+
 def decode(blob: bytes):
     return json.loads(gzip.decompress(blob).decode("utf-8"))
 
@@ -256,9 +292,10 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
             sig = {"date": date, "horizon": h, "schema": SCHEMA, "count": len(items), "items": items,
                    "params": q.get("params", {}), "updated": q.get("updated")}
             if is_latest:
-                docs[f"quant/latest@{h}"] = {"date": date, "horizon": h, "schema": SCHEMA, "params": q.get("params", {}),
-                                             "rdates": hq.get("rdates", []),  # 近 180 交易日（網頁自訂「近 N 日」用）
-                                             "payload": encode_fit(hq.get("stocks", {}), f"quant/latest@{h}")}
+                docs.update(payload_docs(f"quant/latest@{h}", {
+                    "date": date, "horizon": h, "schema": SCHEMA, "params": q.get("params", {}),
+                    "rdates": hq.get("rdates", [])},  # 近 180 交易日（網頁自訂「近 N 日」用）
+                    hq.get("stocks", {})))
                 docs[f"signals/latest@{h}"] = sig
             docs[f"signals/{date}@{h}"] = sig  # 每日存檔，日後可回測訊號的後續表現
 
@@ -268,9 +305,10 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
         e = json.loads(ef.read_text(encoding="utf-8"))
         for h, he in horizons_of(e).items():
             lists = {"date": date, "horizon": h, "schema": SCHEMA, "params": e.get("params", {}), "prior": he.get("prior", {}),
-                     "signals": he.get("signals", [])[:200], "stealth": he.get("stealth", [])[:200], "updated": e.get("updated")}
+                     "signals": he.get("signals", [])[:200], "stealth": he.get("stealth", [])[:200],
+                     "loaded": he.get("loaded", [])[:200], "updated": e.get("updated")}
             if is_latest:
-                docs[f"edge/latest@{h}"] = {"date": date, "horizon": h, "schema": SCHEMA, "payload": encode(he.get("stocks", {}))}
+                docs.update(payload_docs(f"edge/latest@{h}", {"date": date, "horizon": h, "schema": SCHEMA}, he.get("stocks", {})))
                 docs[f"edge/signals@{h}"] = lists
             docs[f"edge_hist/{date}@{h}"] = lists
 

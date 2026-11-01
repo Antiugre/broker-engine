@@ -7,7 +7,8 @@ Expectancy 引擎（Ultra 第二套分點評分；與 quant.py 的 Hit Ratio 引
   2. 摩擦成本：當沖證交稅 0.15%、波段 0.3%；買進 +k 檔、賣出 −k 檔滑價
   3. 統計：Beta-Binomial 貝氏平滑勝率（經驗貝氏先驗），以「每筆期望報酬」排序
   4. 動態門檻：近 3 日買超「金額」或「佔成交量比」，取代固定 30 張
-  5. 緩步建倉（Stealth Accumulation）：20 日窗口內連續小量、單向、分散的進貨
+  5. 緩步建倉（Stealth Accumulation）：30 日窗口內連續小量、單向、分散的進貨
+  6. 建倉完成・等待發動（Loaded）：有優勢的分點近 30 日累積一大筆庫存、還抱著、最近安靜、價格還沒拉開
 
 資料處理架構（Pandas）
   daily frame（每個 股票×分點 一張，index = 交易日曆）
@@ -67,14 +68,22 @@ class EdgeParams:
     threshold_mode: str = "any"         # any：任一成立；all：兩者都要
     hold_ratio_min: float = 0.5
     # 5. 緩步建倉
-    stealth_window: int = 20
-    stealth_min_buy_days: int = 12      # 20 日中至少 12 天淨買
+    stealth_window: int = 30
+    stealth_min_buy_days: int = 18      # 30 日中至少 18 天淨買（與原本 20 日 12 天同比例）
     stealth_max_day_share: float = 0.05 # 任一天淨買 ≤ 當日成交量 5%（不上榜）
-    stealth_min_cum_share: float = 0.02 # 20 日累積淨買 ≥ 20 日成交量 2%
+    stealth_min_cum_share: float = 0.02 # 30 日累積淨買 ≥ 30 日成交量 2%
     stealth_min_direction: float = 0.6  # 方向一致度 Σnet / Σ(buy+sell)
     stealth_max_cv: float = 1.0         # 買進日的張數變異係數（越小越平均）
     stealth_max_top_day: float = 0.25   # 單日淨買 ≤ 窗口累積的 25%（不是一兩天爆量）
     stealth_max_price_run: float = 0.15 # 窗口內漲幅 ≤ 15%（還沒被拉開）
+    # 6. 建倉完成・等待發動
+    loaded_window: int = 30             # 看近 30 個交易日買進、到現在還沒賣掉的庫存
+    loaded_min_amount: float = 50_000_000   # 這批庫存 ≥ 5,000 萬
+    loaded_min_share: float = 0.05      # 或 ≥ 30 日總成交量 5%（兩者任一）
+    loaded_min_hold: float = 0.70       # 這 30 日買進的至少 70% 還在手上
+    loaded_quiet_days: int = 5          # 最近 5 日安靜
+    loaded_quiet_ratio: float = 0.10    # 「安靜」：近 5 日 |淨買賣| 合計 ≤ 庫存的 10%
+    loaded_max_gap: float = 0.08        # 收盤 ≤ 平均成本 +8%（還沒被拉開）
 
     @property
     def fee(self) -> float:
@@ -318,6 +327,53 @@ def stealth(df: pd.DataFrame, p: EdgeParams = DEFAULT) -> dict:
             "price_run": round(price_run, 4), "checks": checks}
 
 
+# ══════════════════════════════ 6. 建倉完成・等待發動 ══════════════════════════════
+def loaded(df: pd.DataFrame, remaining, p: EdgeParams = DEFAULT) -> dict:
+    """
+    不看最近幾天有沒有買，看「近 loaded_window 日買進、到現在還抱著」的那批庫存
+      lots    這批庫存張數（配對後剩下、且買進日在窗口內）
+      amt     金額 = 張數 × 平均成本 × 1000         ≥ 5,000 萬
+      share   張數 / 窗口總成交量                    ≥ 5%（與金額任一成立）
+      hold    這批庫存 / 窗口內淨買進總張數            ≥ 70%（沒有邊買邊倒）
+      quiet   近 5 日 |淨買賣| 合計 / 庫存             ≤ 10%（買完了、在等）
+      gap     收盤 / 平均成本 − 1                      ≤ +8%（價格還沒被拉開）
+    """
+    n = len(df)
+    if n < 10:
+        return {"flag": False}
+    cut = max(0, n - p.loaded_window)
+    held = [(i, d, q, px) for i, d, q, px in remaining if i >= cut]
+    lots = sum(q for _, _, q, _ in held)
+    if lots <= 1e-9:
+        return {"flag": False}
+    w = df.iloc[cut:]
+    bought = float(w["net"].clip(lower=0).sum())
+    cost = sum(q * px for _, _, q, px in held) / lots
+    vol = float(w["vol"].sum()) if w["vol"].notna().any() else 0.0
+    share = lots / vol if vol else None
+    hold = lots / bought if bought else 0.0
+    tail = df["net"].iloc[-p.loaded_quiet_days:]
+    quiet = float(tail.abs().sum()) / lots
+    quiet_days = 0
+    for v in df["net"].iloc[::-1]:
+        if abs(v) > lots * p.loaded_quiet_ratio / p.loaded_quiet_days:
+            break
+        quiet_days += 1
+    close = float(df["close"].iloc[-1]) if pd.notna(df["close"].iloc[-1]) else None
+    gap = close / cost - 1 if close and cost else None
+    amt = lots * cost * LOT
+    checks = {
+        "size": amt >= p.loaded_min_amount or (share is not None and share >= p.loaded_min_share),
+        "hold": hold >= p.loaded_min_hold,
+        "quiet": quiet <= p.loaded_quiet_ratio,
+        "gap": gap is not None and gap <= p.loaded_max_gap,
+    }
+    return {"flag": all(checks.values()), "lots": round(lots), "cost": round(cost, 2), "amt": round(amt),
+            "share": None if share is None else round(share, 4), "hold": round(hold, 3), "quiet": round(quiet, 3),
+            "quiet_days": int(quiet_days), "gap": None if gap is None else round(gap, 4),
+            "from": min(d for _, d, _, _ in held), "to": max(d for _, d, _, _ in held), "checks": checks}
+
+
 # ══════════════════════════════ 單一分點評估 ══════════════════════════════
 def open_position(remaining, last_price, p: EdgeParams = DEFAULT) -> dict:
     lots = sum(q for _, _, q, _ in remaining)
@@ -343,6 +399,8 @@ def analyse(rows: list[dict], prices: dict[str, dict], p: EdgeParams = DEFAULT) 
         held_recent = sum(q for _, d, q, _ in remaining if d in recent)
         out[track] = {**raw_summary(trades), **open_position(remaining, last, p), "held_recent": held_recent,
                       "ghost": round(ev["ghost"]), "cap": round(ev["cap"]), "um": round(ev["unmatched"])}
+        if track == p.track:
+            out["loaded"] = loaded(df, remaining, p)
     out["flow"] = recent_flow(df, p)
     out["stealth"] = stealth(df, p)
     return out
@@ -368,12 +426,14 @@ def finalize(a: dict, prior: dict, p: EdgeParams = DEFAULT) -> dict:
         "ghost": t["ghost"], "cap": t["cap"], "um": t["um"],
         "net3": round(flow["net3"]), "amt3": round(flow["amt3"]), "vs3": r4(flow["vs3"]), "big": big,
         "stealth": {k: v for k, v in st.items() if k != "checks"}, "lp": a["lp"], "from": a["from"],
+        "loaded": {**{k: v for k, v in (a.get("loaded") or {}).items() if k != "checks"},
+                   "flag": bool(edge and (a.get("loaded") or {}).get("flag"))},
     }
 
 
 # ══════════════════════════════ 每日批次 ══════════════════════════════
 def stealth_candidates(fetcher, sid: str, day: str, p: EdgeParams = DEFAULT) -> dict[str, dict]:
-    """20 日區間合計的買超前 15 名（緩步建倉的分點常不在單日榜，但會在區間榜）"""
+    """近 30 日（×1.5 日曆天）區間合計的買超前 15 名（緩步建倉、已建倉完成的分點常不在單日榜，但會在區間榜）"""
     from history import history_key
 
     rec = quant.range_record(fetcher, sid, day, int(p.stealth_window * 1.5))
@@ -397,7 +457,7 @@ def run(day: str, stocks: list[str], fetcher=None, p: EdgeParams = DEFAULT, prog
                 for k, r in stealth_candidates(fetcher, sid, day, p).items():
                     branches.setdefault(k, r)
             except Exception as ex:  # noqa: BLE001
-                log.warning("[%s] 20 日區間榜失敗：%s", sid, ex)
+                log.warning("[%s] 區間榜失敗：%s", sid, ex)
             if not branches:
                 continue
             try:
@@ -426,7 +486,7 @@ def run(day: str, stocks: list[str], fetcher=None, p: EdgeParams = DEFAULT, prog
               "updated": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
     for h, by_stock in analysed.items():
         prior = empirical_prior([a[p.track] for per in by_stock.values() for _, a in per.values()], p)
-        hr = {"prior": prior, "stocks": {}, "signals": [], "stealth": []}
+        hr = {"prior": prior, "stocks": {}, "signals": [], "stealth": [], "loaded": []}
         for sid, per in by_stock.items():
             hr["stocks"][sid] = {}
             for key, (row, a) in per.items():
@@ -439,16 +499,19 @@ def run(day: str, stocks: list[str], fetcher=None, p: EdgeParams = DEFAULT, prog
                     hr["signals"].append({**ident, **f})
                 if f["stealth"].get("flag"):
                     hr["stealth"].append({**ident, **f})
+                if f["loaded"].get("flag"):
+                    hr["loaded"].append({**ident, **f})
         hr["signals"].sort(key=lambda s: (-(s["ev"] or 0), -(s["lo"] or 0)))      # 期望值為核心排序
         hr["stealth"].sort(key=lambda s: (-s["stealth"]["score"], -(s["ev"] or 0)))
+        hr["loaded"].sort(key=lambda s: (-(s["ev"] or 0), -(s["loaded"].get("amt") or 0)))
         result["horizons"][h] = hr
     result.update(result["horizons"][quant.DEFAULT_HORIZON])  # 頂層 = 預設範圍
     prior = result["prior"]
     out = EDGE_DIR / f"{day}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=float), encoding="utf-8")
-    log.info("Expectancy：%d 個分點、%d 個訊號、%d 個緩步建倉（先驗 p0=%.3f，%.0f 秒）",
-             sum(len(v) for v in result["stocks"].values()), len(result["signals"]), len(result["stealth"]),
+    log.info("Expectancy：%d 個分點、%d 個訊號、%d 個緩步建倉、%d 個建倉完成（先驗 p0=%.3f，%.0f 秒）",
+             sum(len(v) for v in result["stocks"].values()), len(result["signals"]), len(result["stealth"]), len(result["loaded"]),
              prior["p0"], time.time() - t0)
     return result
 
