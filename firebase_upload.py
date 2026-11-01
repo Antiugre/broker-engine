@@ -299,6 +299,43 @@ def load_state() -> dict:
         return {}
 
 
+MAX_BATCH_BYTES = 3_500_000   # 每批約 3.5 MB（Firestore 單次請求上限 10 MiB，留足餘裕）
+MAX_BATCH_DOCS = 200          # 每批最多 200 份（上限 500）
+
+
+def _chunks(paths: list[str], sizes: dict[str, int]):
+    cur, size = [], 0
+    for p in paths:
+        n = sizes.get(p, 0)
+        if cur and (size + n > MAX_BATCH_BYTES or len(cur) >= MAX_BATCH_DOCS):
+            yield cur
+            cur, size = [], 0
+        cur.append(p)
+        size += n
+    if cur:
+        yield cur
+
+
+def _commit(db, items: list[tuple[str, dict]], *, label: str = "", tries: int = 5) -> None:
+    """寫入一批；逾時／暫時性錯誤時等一下再重試（最多 5 次）"""
+    import time
+    for attempt in range(1, tries + 1):
+        batch = db.batch()
+        for p, d in items:
+            col, doc_id = p.split("/", 1)
+            batch.set(db.collection(col).document(doc_id), d)
+        try:
+            batch.commit(timeout=300)
+            log.info("  Firestore 第 %s 批：%d 份完成", label, len(items))
+            return
+        except Exception as e:  # noqa: BLE001 — DeadlineExceeded / ServiceUnavailable / Aborted 等
+            if attempt == tries:
+                raise
+            wait = 15 * attempt
+            log.warning("  Firestore 第 %s 批寫入失敗（%s），%d 秒後重試（%d/%d）", label, type(e).__name__, wait, attempt, tries)
+            time.sleep(wait)
+
+
 def save_state(state: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=1), encoding="utf-8")
@@ -337,13 +374,15 @@ def upload(date: str, stocks: list[str] | None = None, *, dry_run: bool = False,
         return {"written": [], "would_write": list(changed), "skipped": [p for p in docs if p not in changed], "bytes": sizes}
 
     if changed:
-        batch = db.batch()  # 一個 batch 原子性寫入：前端不會讀到「meta 已更新但 days 還沒寫」的狀態
-        for p, d in changed.items():
-            col, doc_id = p.split("/", 1)
-            batch.set(db.collection(col).document(doc_id), d)
-        batch.commit()
-        for p, d in changed.items():
-            state[p] = sha(d)
-        save_state(state)
+        # 分批寫入：Order Flow 每天數百份、每份 20～170 KB，一次全塞進同一個 batch 會超過 Firestore 的
+        # 請求大小／時間上限（2026-10-31 雲端執行即因此 504 Deadline Exceeded）。
+        # meta/* 放最後一批：前端看到新的日期清單時，其他文件都已寫好。
+        order = sorted(changed, key=lambda p: (p.startswith("meta/"), p))
+        chunks = list(_chunks(order, sizes))
+        for i, chunk in enumerate(chunks, 1):
+            _commit(db, [(p, changed[p]) for p in chunk], label=f"{i}/{len(chunks)}")
+            for p in chunk:
+                state[p] = sha(changed[p])
+            save_state(state)  # 每批寫完就記錄：中途失敗時，下次只補沒寫成功的
     log.info("Firestore 寫入 %d 份文件、略過 %d 份", len(changed), len(docs) - len(changed))
     return {"written": list(changed), "skipped": [p for p in docs if p not in changed], "bytes": sizes}
