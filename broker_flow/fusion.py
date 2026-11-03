@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 
 from .params import P
@@ -19,7 +21,7 @@ def clip(p):
 def cct(ps, ws=None) -> np.ndarray:
     """8.1 Cauchy 組合檢定。ps: list of arrays（NaN = 該維度缺失，剩下的平分權重）"""
     ps = [np.asarray(p, float) for p in ps]
-    shape = np.broadcast(*ps).shape
+    shape = functools.reduce(np.broadcast_shapes, [p.shape for p in ps], ())   # np.broadcast 最多 64 個參數
     P_ = np.stack([np.broadcast_to(p, shape) for p in ps])
     ok = np.isfinite(P_)
     if ws is None:

@@ -382,6 +382,16 @@ def _parallel(mk: Market, jobs: list) -> list:
         return pool.map(_null_job, jobs)
 
 
+def window_c_cached(mk: Market, end: str) -> dict | None:
+    """只讀存檔（時間到之後仍可用已算好的窗口）"""
+    cf = CACHE / f"dim_c_{end}.pkl"
+    if cf.exists():
+        cached = pickle.loads(cf.read_bytes())
+        if cached.get("sig") == mk.signature(end):
+            return cached
+    return None
+
+
 def window_c(mk: Market, end: str, sids: list[str], seed: int = 0) -> dict:
     """某個窗口結束日：全市場每檔 (j,w) 配對的 p_C、dir_C（結果存檔，之後重用）。
     候選＝主規格 6.0 的候選（含外資）；exclude_foreign 版本在使用時把外資配對拿掉"""

@@ -90,7 +90,7 @@ def run(sid: str, quick: bool = False, seed: int = 0, mk=None, ctx: dict | None 
         log.warning("主力集團 %s：資料不足（%d 個交易日、%d 個分點），略過", sid, len(pn.dates), len(pn.branches))
         return {}
     store.write(accounting.to_table(pn, cx.L), sid, "ledger")
-    from .dim_c import window_c
+    from .dim_c import window_c, window_c_cached
     from .group import deadline_passed
     f3 = lambda x: None if x is None or not np.isfinite(x) else float(f"{x:.3g}")  # noqa: E731
     variants = {}
@@ -99,11 +99,15 @@ def run(sid: str, quick: bool = False, seed: int = 0, mk=None, ctx: dict | None 
         if mk is not None:
             for w in reversed(wins):                       # 新的窗口先算；時間到就停（已算的都有存檔，下次接著算）
                 end = str(pn.dates[w["end"]])
-                if deadline_passed():
-                    log.warning("主力集團 %s：時間到，%s 之前的窗口維度 C 下次再算", sid, end)
-                    break
-                if w["res"] is not None and mk.fit_for(end) is not None and sid in mk.six:
-                    attach_c(w, pn, window_c(mk, end, [], seed=seed))
+                if w["res"] is None or mk.fit_for(end) is None or sid not in mk.six:
+                    continue
+                if deadline_passed():                      # 時間到：只用已存檔的窗口
+                    cres = window_c_cached(mk, end)
+                    if cres is None:
+                        continue
+                else:
+                    cres = window_c(mk, end, [], seed=seed)
+                attach_c(w, pn, cres)
         pt = pairs_table(pn, wins)
         store.write(pt, sid, "pairs" if not xf else "pairs_exclude_foreign")
         variants[var] = (wins, pt)
