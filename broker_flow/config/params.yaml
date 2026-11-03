@@ -1,9 +1,29 @@
 # 台股分點主力集團偵測：事先固定參數（規格書第 10 節）
 # 修改規則：寫入 broker_flow/CHANGELOG.md 並說明理由，理由不得來自驗證結果。
-version: 1
+version: 2
+
+exclude_foreign: false        # 修正規格第 1 節：預設關閉；網頁另外並列 true 的結果（消融比較）
+
+revision:                     # 修正規格（反向配合／壓價轉移）
+  b2_sell_mult: 2.0           # 5.1 賣方大量賣出：≥ 120 日活躍日 |淨買賣| 中位數 × 2
+  b2_sell_min_lots: 10        # 5.1 且 ≥ 10 張
+  b2_absorb_ratio: 0.1        # 5.1 買方承接 ≥ 賣方淨賣量 × 0.1
+  b2_vwap_tol: 0.005          # 5.1 價位重疊：VWAP 差 ≤ 收盤 0.5%（本資料源無法判斷，B2 不計算）
+  b2_null: 50                 # 5.5
+  loss_leg_vwap_tol: 0.01     # 6.2 虧損腿 VWAP 容差 1%
 
 run:
-  test_stocks: ["2601"]     # 測試階段每晚只算這幾檔（網頁僅管理員可見）
+  test_stocks: ["2601", "5907"]   # 測試階段每晚算的股票（網頁僅管理員可見）
+
+groups:                       # 集團模式：成員依時間切分（窗口必須整段落在成員期間內）
+  - id: "2601G"
+    name: "益航集團"
+    members:
+      - {sid: "2601", from: "2000-01-01", to: "2099-12-31"}
+      - {sid: "5907", from: "2000-01-01", to: "2025-11-30"}   # 益航對大洋-KY 的控制關係 2025 年 12 月終止（SPEC-GAP：確切日期待確認）
+    known_branches: []        # 已知標籤：迅東、恆華等申報轉讓實際使用的分點（富邦分點代碼），待提供
+    fake_groups: 50           # 假集團組數
+    exclude_from_fake: ["2601", "5907"]
 
 accounting:
   warmup_days: 180            # 4.4 暖身期（交易日）
@@ -30,7 +50,27 @@ detection:
   active_scale_mult: 0.5
   logistic_C: 10              # 6.1 L2 正則化
   mag_min_common: 20          # 6.1 幅度相關最少共同活躍日
-  znet_extreme: 2             # 6.3（維度 C，本版未啟用）
+  znet_extreme: 2             # 6.3 z_net 異常門檻 ±2
+
+dim_c:
+  fit_weeks: 104              # 6.3 每次擬合用最近 104 週
+  refit_weeks: 13             # 6.3 每 13 週重擬
+  rank_candidates: [10, 20, 40, 60, 80, 100]   # 6.3 只選一次
+  inits: 10                   # 6.3 初始值次數
+  fms_min: 0.8                # 6.3 穩定門檻
+  stable_min: 8
+  appear_stock: 0.02          # 6.3 分量出現門檻 v_r[j]
+  appear_weeks: 0.05          # 6.3 窗口內 Σw_r
+  fraudar_edge: 3             # 6.3 窗口內 z_net 累積 ≥ 3（賣方 ≤ −3）
+  fraudar_blocks: 20
+  null_cp: 20                 # 7.1 排列次數
+  null_fr: 50
+  refit_change: 0.05          # SPEC-GAP：張量非零格數變動超過 5% 才重擬（計算量考量）
+
+nulls:
+  gpd_max_null: 1000000       # 7.3 N_null < 10⁶ 才用 GPD
+  gpd_quantile: 0.99          # 7.3 門檻＝第 99 百分位數
+  gpd_min_exceed: 10          # SPEC-GAP：擬合 GPD 至少要的超越數
 
 fusion:
   fdr_q: 0.05                 # 8.3 全局 BH
