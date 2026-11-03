@@ -1,32 +1,37 @@
-# 每日雲端運算（主跑）：下載快取 → 抓當日資料、增量更新 → 三套 Ultra 運算 → 上傳 Firestore → 更新快取
-# 主跑：MandM 每晚 18:30（Windows 工作排程）；雲端 23:00 只做備援
+# 每日雲端運算（主跑）：三段接力，每段都在 GitHub 單次 6 小時限制內
+#   ① download：還原快取 → 等富邦／兆豐資料更新 → 下載（兩站同時）→ 全分點反查 → Hit Ratio → 先行上傳
+#   ② edge：Expectancy → 先行上傳
+#   ③ flow：Order Flow → 本土主力 → 中小型吃貨 → 整批上傳 → 更新長期資料快取（Release「cache」）
+#   段與段之間用 artifact 傳整個 data/（約幾百 MB，保留 2 天）
+#   本機（MandM）改為備援：關機也沒關係
 name: daily-pipeline
 
 on:
   schedule:
-    - cron: "0 15 * * 1-5"        # 台灣時間 週一～五 23:00：備援（MandM 主跑 18:30；今天已完成或正在跑就直接結束）
+    - cron: "40 9 * * 1-5"        # 台灣時間 週一～五 17:40（富邦約 17:00 更新；沒更新會每 20 分鐘再試，最多 4 次）
   workflow_dispatch:
     inputs:
+      date:
+        description: "指定日期 YYYY-MM-DD（空白 = 最近交易日）"
+        required: false
+      start:
+        description: "從哪一段開始（前面的段已跑完、只要重跑後面時用）"
+        type: choice
+        options: [download, edge, flow]
+        default: download
       stocks:
         description: "只算這些股票（空白 = Ultra 自選＋成交值前 N 名），例：2330 2317"
         required: false
       top:
         description: "成交值前幾名"
         required: false
-        default: "100"
-      date:
-        description: "指定日期 YYYY-MM-DD（空白 = 最近交易日）"
-        required: false
+        default: "200"
       no_upload:
-        description: "只測試、不上傳 Firestore"
+        description: "只測試、不上傳 Firestore（也不更新快取）"
         type: boolean
         default: false
       no_sweep:
-        description: "略過全分點反查（較快，約省 25 分鐘；前 15 名以外的分點今天不更新）"
-        type: boolean
-        default: false
-      upload_only:
-        description: "只補上傳（不重新下載與運算；用於上一次運算完成但上傳失敗）"
+        description: "略過全分點反查"
         type: boolean
         default: false
 
@@ -37,61 +42,142 @@ concurrency:
 permissions:
   contents: write                  # 更新 Release「cache」附件
 
+env:
+  TZ: Asia/Taipei
+  BB_DATA_DIR: ${{ github.workspace }}/data
+  BB_ROLE: cloud
+  FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+  GH_TOKEN: ${{ github.token }}
+  PYTHONUTF8: "1"
+
 jobs:
-  run:
+  download:
+    if: ${{ github.event_name == 'schedule' || inputs.start == 'download' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 340
-    env:
-      TZ: Asia/Taipei
-      BB_DATA_DIR: ${{ github.workspace }}/data
-      BB_ROLE: cloud
-      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-      GH_TOKEN: ${{ github.token }}
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
+        with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
-
       - name: 還原長期資料快取
         run: |
           gh release download cache --pattern data_cache.tar.gz --dir . --clobber || echo "尚無快取"
-          python tools/cache_bundle.py unpack --file data_cache.tar.gz
-
+          [ -f data_cache.tar.gz ] && python tools/cache_bundle.py unpack --file data_cache.tar.gz || true
       - name: Firebase 金鑰（來自 Secrets，不寫進 repo）
         if: ${{ !inputs.no_upload }}
-        env:
-          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
         run: |
           printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
           echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
-
-      - name: 執行 pipeline
+      - name: ① 下載＋全分點反查＋Hit Ratio
         run: |
-          ARGS="--wait-ready --max-hours 5"
-          # 排程＝備援：MandM 今天已上傳或正在跑就結束；接手時只算雲端快取裡已建好的股票（不在雲端做初次建檔）
-          [ "${{ github.event_name }}" = "schedule" ] && ARGS="$ARGS --failover --only-cached"
-          [ -n "${{ inputs.stocks }}" ] && ARGS="$ARGS --stocks ${{ inputs.stocks }}"
-          [ -n "${{ inputs.top }}" ] && ARGS="$ARGS --top ${{ inputs.top }}"
+          ARGS="--stage download --wait-ready --max-hours 5.5 --top ${{ inputs.top || '200' }}"
           [ -n "${{ inputs.date }}" ] && ARGS="$ARGS --date ${{ inputs.date }}"
+          [ -n "${{ inputs.stocks }}" ] && ARGS="$ARGS --stocks ${{ inputs.stocks }}"
           [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
           [ "${{ inputs.no_sweep }}" = "true" ] && ARGS="$ARGS --no-sweep"
-          [ "${{ inputs.upload_only }}" = "true" ] && ARGS="--upload-only --no-quant $([ -n "${{ inputs.date }}" ] && echo --date ${{ inputs.date }})"
           python pipeline.py $ARGS
+          test -f data/_stage.json   # 資料還沒出來（等待逾時）或下載失敗 → 這一段失敗，後面兩段不跑
+      - name: 交給下一段
+        if: ${{ always() }}
+        run: tar -cf state.tar data
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with: { name: state-download, path: state.tar, retention-days: 2, compression-level: 6 }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: logs-download-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
 
-      - name: 更新長期資料快取
-        if: ${{ always() }}   # 指定股票或中途取消也保存（下次不必重抓）
+  edge:
+    needs: download
+    if: ${{ always() && (needs.download.result == 'success' || inputs.start == 'edge') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: 接手上一段的資料
+        if: ${{ needs.download.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with: { name: state-download }
+      - name: 還原資料
+        run: |
+          if [ -f state.tar ]; then tar -xf state.tar; else
+            gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
+          fi
+      - name: Firebase 金鑰
+        if: ${{ !inputs.no_upload }}
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: ② Expectancy
+        run: |
+          ARGS="--stage edge --max-hours 5.6"
+          [ -n "${{ inputs.date }}" ] && ARGS="$ARGS --date ${{ inputs.date }}"
+          [ -n "${{ inputs.stocks }}" ] && ARGS="$ARGS --stocks ${{ inputs.stocks }}"
+          [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
+          python pipeline.py $ARGS
+      - name: 交給下一段
+        if: ${{ always() }}
+        run: tar -cf state.tar data
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with: { name: state-edge, path: state.tar, retention-days: 2, compression-level: 6, overwrite: true }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: logs-edge-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
+
+  flow:
+    needs: edge
+    if: ${{ always() && (needs.edge.result == 'success' || inputs.start == 'flow') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: 接手上一段的資料
+        if: ${{ needs.edge.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with: { name: state-edge }
+      - name: 還原資料
+        run: |
+          if [ -f state.tar ]; then tar -xf state.tar; else
+            gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
+          fi
+      - name: Firebase 金鑰
+        if: ${{ !inputs.no_upload }}
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: ③ Order Flow＋本土主力＋中小型吃貨＋整批上傳
+        run: |
+          ARGS="--stage flow --max-hours 5.4"
+          [ -n "${{ inputs.date }}" ] && ARGS="$ARGS --date ${{ inputs.date }}"
+          [ -n "${{ inputs.stocks }}" ] && ARGS="$ARGS --stocks ${{ inputs.stocks }}"
+          [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
+          python pipeline.py $ARGS
+      - name: 更新長期資料快取（下次接著用）
+        if: ${{ always() && !inputs.no_upload }}
         run: |
           python tools/cache_bundle.py pack --out data_cache.tar.gz
           gh release view cache >/dev/null 2>&1 || gh release create cache --title "data cache" --notes "長期資料快取（自動更新）" --prerelease
           gh release upload cache data_cache.tar.gz --clobber
-
-      - name: 保留日誌
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
         with:
-          name: logs-${{ github.run_id }}
+          name: logs-flow-${{ github.run_id }}
           path: logs/
           retention-days: 14
