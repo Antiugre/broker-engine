@@ -2,6 +2,7 @@
 #   ① download：還原快取 → 等富邦／兆豐資料更新 → 下載（兩站同時）→ 全分點反查 → Hit Ratio → 先行上傳
 #   ② edge：Expectancy → 先行上傳
 #   ③ flow：Order Flow → 本土主力 → 中小型吃貨 → 整批上傳 → 更新長期資料快取（Release「cache」）
+#   ④ syndicate：主力集團偵測（測試版，全市場維度 C＋集團＋假集團對照）→ 只上傳 syndicate/*；中間結果存 Release「cache」的 broker_flow_cache.tar.gz
 #   段與段之間用 artifact 傳整個 data/（約幾百 MB，保留 2 天）
 #   本機（MandM）改為備援：關機也沒關係
 name: daily-pipeline
@@ -17,7 +18,7 @@ on:
       start:
         description: "從哪一段開始（前面的段已跑完、只要重跑後面時用）"
         type: choice
-        options: [download, edge, flow]
+        options: [download, edge, flow, syndicate]
         default: download
       stocks:
         description: "只算這些股票（空白 = Ultra 自選＋成交值前 N 名），例：2330 2317"
@@ -180,5 +181,43 @@ jobs:
         if: ${{ always() }}
         with:
           name: logs-flow-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
+
+  syndicate:
+    needs: flow
+    if: ${{ always() && (needs.flow.result == 'success' || inputs.start == 'syndicate') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: 還原資料（長期資料快取＋主力集團中間結果）
+        run: |
+          gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
+          gh release download cache --pattern broker_flow_cache.tar.gz --dir . --clobber && mkdir -p data/broker_flow && tar -xzf broker_flow_cache.tar.gz -C data/broker_flow || echo "尚無主力集團快取（第一次會比較久）"
+      - name: Firebase 金鑰
+        if: ${{ !inputs.no_upload }}
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: ④ 主力集團偵測（測試版）
+        run: |
+          ARGS="--max-hours 5.2"
+          [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
+          python tools/syndicate_now.py $ARGS
+      - name: 存主力集團中間結果（下次接著算）
+        if: ${{ always() && !inputs.no_upload }}
+        run: |
+          [ -d data/broker_flow/_cache ] || exit 0
+          tar -czf broker_flow_cache.tar.gz -C data/broker_flow _cache
+          gh release upload cache broker_flow_cache.tar.gz --clobber
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: logs-syndicate-${{ github.run_id }}
           path: logs/
           retention-days: 14
