@@ -194,7 +194,9 @@ def run_groups(mk, ctx: dict) -> list[dict]:
 def run_all(stocks: list[str] | None = None, quick: bool = False, max_hours: float | None = None) -> list[dict]:
     """每晚：全市場（維度 C）→ 測試股票 → 集團。max_hours：時間到就停（已算的窗口都有存檔，下次接著算）"""
     from . import group
-    group.DEADLINE[0] = time.time() + max_hours * 3600 if max_hours else None
+    t0 = time.time()
+    # 時間分兩半：前半給逐檔（維度 C 新窗口先算），後半給集團（同一批窗口有存檔可直接用，再往前補算），免得集團一個窗口都沒有
+    group.DEADLINE[0] = t0 + max_hours * 3600 * 0.5 if max_hours else None
     mk = load_market()
     ctx: dict = {}
     docs = []
@@ -204,6 +206,7 @@ def run_all(stocks: list[str] | None = None, quick: bool = False, max_hours: flo
             if d:
                 docs.append(d)
     if mk is not None:
+        group.DEADLINE[0] = t0 + max_hours * 3600 if max_hours else None
         docs += run_groups(mk, ctx)
     return docs
 
