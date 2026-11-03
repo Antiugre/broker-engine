@@ -92,6 +92,11 @@ service cloud.firestore {
       allow get: if isUltra() || isAdmin();
       allow list, write: if false;
     }
+    match /syndicate/{docId} {       // 主力集團偵測（測試版，只有管理員能看）
+      allow get: if isAdmin();
+      allow create, update: if isAdmin() && request.resource.data.stock_id is string;   // 測試期間：管理員可從網頁寫入試算結果
+      allow list, delete: if false;
+    }
     match /edge_hist/{docId} {
       allow get: if isUltra() || isAdmin();
       allow list, write: if false;
