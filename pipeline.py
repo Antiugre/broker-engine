@@ -248,6 +248,11 @@ def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
             have = {p.parent.name for p in quant.LONG_DIR.glob("*/_prices.json")}
             log.info("只算已建檔的股票：%d → %d 檔", len(stocks), len([s for s in stocks if s in have]))
             stocks = [s for s in stocks if s in have]
+        try:   # 主力集團偵測（測試版）的測試股票也要每天下載更新
+            from broker_flow.params import P as _bf
+            stocks += [s for s in _bf.run.test_stocks if s not in stocks]
+        except Exception:  # noqa: BLE001
+            log.exception("讀取主力集團測試股票失敗（略過）")
     if not stocks:
         log.error("今天沒有要計算的股票（讀不到 Ultra 自選，也拿不到全市場成交值排行）")
         return 1
@@ -336,6 +341,16 @@ def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
                 smallcap.run(day, stocks)
             except Exception:  # noqa: BLE001
                 log.exception("中小型吃貨計算失敗（主資料照常上傳）")
+            try:
+                import quant
+                from broker_flow import run as bf_run
+                from broker_flow.params import P as _bf
+                for sid in _bf.run.test_stocks:
+                    if (quant.LONG_DIR / sid / "_prices.json").exists():
+                        beat(f"主力集團 {sid}", force=True)
+                        bf_run.run(sid)
+            except Exception:  # noqa: BLE001
+                log.exception("主力集團偵測（測試版）失敗（主資料照常上傳）")
 
         if args.no_upload:
             log.info("--no-upload：略過上傳")

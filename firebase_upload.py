@@ -33,6 +33,7 @@ Firestore 結構（為了極致節省「寫入次數」）
   flow/{stock_id}@h、flow/_index@h ← Order Flow（flowlab/schema.py）：行為標籤、群聚、成本防守區、異常背離
   force/{stock_id}             ← 本土主力（mainforce.py）：本土分點 5 年累計庫存推算的主力持股（Ultra 限定）
   smallcap/latest              ← 中小型吃貨（smallcap.py）：中小型股本土分點吃貨訊號＋回測摘要（Ultra 限定）
+  syndicate/{stock_id}、_index ← 主力集團偵測（broker_flow，測試版）：窗口、集團、驗證摘要（管理員限定）
 
 一天合計約 3 次寫入（meta + days + hist），與追蹤幾檔股票幾乎無關。
 內容沒變就不寫（本地記錄 SHA-256），重跑腳本是 0 次寫入。
@@ -330,6 +331,18 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
     sfile = DATA_DIR / "smallcap" / f"{date}.json"
     if sfile.exists() and is_latest:
         docs["smallcap/latest"] = json.loads(sfile.read_text(encoding="utf-8"))
+
+    # 主力集團偵測（broker_flow，測試版，管理員限定）：每檔一份 syndicate/{代號} ＋ syndicate/_index
+    bdir = DATA_DIR / "broker_flow"
+    if bdir.exists() and is_latest:
+        idx = []
+        for f in sorted(bdir.glob("*/summary.json")):
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if d.get("asof") == date:
+                docs[f"syndicate/{d['stock_id']}"] = d
+            idx.append({"id": d["stock_id"], "name": d.get("stock_name") or "", "asof": d.get("asof")})
+        if idx:
+            docs["syndicate/_index"] = {"stock_id": "_index", "stocks": idx}
 
     # meta（最後寫）
     prev_dates = (prev_meta or {}).get("dates", [])
