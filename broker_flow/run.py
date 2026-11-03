@@ -22,6 +22,7 @@ from .validation import calibration, synthetic
 
 log = logging.getLogger("broker_scraper")
 SHOW_WINDOWS = 12      # 網頁顯示最近幾個窗口的明細（其餘只給計數）
+MIN_BRANCHES = 20      # 分點少於這個數不產出（SPEC-GAP：規格未定義，保守起見）
 
 SPEC_GAPS = [
     ("資料粒度", "本專案只有「日期 × 分點」買賣張數，沒有成交價位 → 3.3 守恆檢查、維度 B（冷門價位共現）、5.3 Wasserstein 無法計算"),
@@ -60,8 +61,11 @@ def run(sid: str, quick: bool = False, seed: int = 0) -> dict:
         ids = _branch_ids()
     except Exception:  # noqa: BLE001
         ids = {}
-    store.write(accounting.to_table(pn, cx.L), sid, "ledger")
     ends = window_ends(pn)
+    if not ends or len(pn.branches) < MIN_BRANCHES:   # 資料還沒建完整（例如雲端剛開始追蹤）→ 不產出，免得蓋掉完整的結果
+        log.warning("主力集團 %s：資料不足（%d 個交易日、%d 個分點），略過", sid, len(pn.dates), len(pn.branches))
+        return {}
+    store.write(accounting.to_table(pn, cx.L), sid, "ledger")
     wins = [run_window(cx, e, allow_holdout=True) for e in ends]
     pt = pairs_table(pn, wins)
     store.write(pt, sid, "pairs")
