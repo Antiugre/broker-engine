@@ -19,3 +19,6 @@ jobs:
       - run: pip install requests pandas pyarrow
       - env: { FINMIND_TOKEN: "${{ secrets.FINMIND_TOKEN }}" }
         run: python tools/finmind_probe.py --date "${{ inputs.date }}"
+      - name: 私人資料倉庫可讀取（只印檔案數）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: gh release view TaiwanStockTradingDailyReport -R Antiugre/broker-data --json assets -q '.assets | length'
