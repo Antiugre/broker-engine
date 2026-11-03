@@ -1,0 +1,51 @@
+# 台股分點主力集團偵測：事先固定參數（規格書第 10 節）
+# 修改規則：寫入 broker_flow/CHANGELOG.md 並說明理由，理由不得來自驗證結果。
+version: 1
+
+run:
+  test_stocks: ["2601"]     # 測試階段每晚只算這幾檔（網頁僅管理員可見）
+
+accounting:
+  warmup_days: 180            # 4.4 暖身期（交易日）
+  fee_rate: 0.001425          # 4.3 手續費（買賣各一次，不假設折扣）
+  tax_sell: 0.003             # 4.3 一般賣出證交稅
+  tax_daytrade: 0.0015        # 4.3 當沖賣出證交稅（SPEC-GAP：生效日期表待核對，暫用現行 0.15%）
+
+behavior:
+  rolling_days: 120           # 5.1 滾動長度
+  daytrade_ratio: 0.6         # 5.1 當沖型：Σdt ÷ Σ(b+s)/2 ≥ 0.6
+  overnight_event_mult: 2.0   # 5.1 隔日沖事件：單日淨買 ≥ 活躍日淨買中位數 × 2
+  overnight_ratio: 0.7        # 5.1 t+1～t+3 賣出比例中位數 ≥ 0.7
+  overnight_min_events: 5     # 5.1 事件數 ≥ 5
+  min_active_days: 10         # 5.1 樣本不足 → unclassified
+
+features:
+  wasserstein_min_lots: 10    # 5.3（本資料源沒有價位明細，不計算）
+
+detection:
+  window_days: 120            # 6.0 窗口長度
+  window_step: 20             # 6.0 步長
+  min_candidate_active: 5     # 6.0 候選分點最少活躍日
+  active_min_shares: 1000     # 6.0 活躍日門檻 max(1,000 股, 0.5 × scale_i)
+  active_scale_mult: 0.5
+  logistic_C: 10              # 6.1 L2 正則化
+  mag_min_common: 20          # 6.1 幅度相關最少共同活躍日
+  znet_extreme: 2             # 6.3（維度 C，本版未啟用）
+
+fusion:
+  fdr_q: 0.05                 # 8.3 全局 BH
+  group_inventory_share: 0.005  # 8.5 集團成本納入門檻：庫存 ≥ 窗口總成交量 0.5%
+  p_clip: 1.0e-15             # 第 0 節第 6 條
+
+validation:
+  naive_last_days: 20         # 9.0 樸素基準線
+  naive_top: 10
+  c2st_auc_max: 0.6           # 9.3 C2ST 接受門檻
+  holdout_months: 12          # 9.5
+  synthetic:
+    K: [2, 3, 5, 8]
+    rho: [1.0, 0.8, 0.5, 0.3]
+    reps: 20
+  calibration:
+    ks_min_p: 0.01            # 7.4
+    frac01_range: [0.005, 0.02]
