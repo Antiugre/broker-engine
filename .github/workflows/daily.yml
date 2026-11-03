@@ -46,6 +46,7 @@ env:
   TZ: Asia/Taipei
   BB_DATA_DIR: ${{ github.workspace }}/data
   BB_ROLE: cloud
+  BB_MIRRORS: fubon                # 兆豐（moneydj.emega.com.tw）擋海外機房 IP，雲端只用富邦；兆豐並聯只在台灣的電腦有用
   FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
   GH_TOKEN: ${{ github.token }}
   PYTHONUTF8: "1"
