@@ -31,6 +31,8 @@ Firestore 結構（為了極致節省「寫入次數」）
   edge/latest、edge/signals    ← Expectancy 引擎（quant_edge.py）的統計與「訊號＋緩步建倉」清單
   edge_hist/{YYYY-MM-DD}       ← Expectancy 清單的每日存檔
   flow/{stock_id}@h、flow/_index@h ← Order Flow（flowlab/schema.py）：行為標籤、群聚、成本防守區、異常背離
+  force/{stock_id}             ← 本土主力（mainforce.py）：本土分點 5 年累計庫存推算的主力持股（Ultra 限定）
+  smallcap/latest              ← 中小型吃貨（smallcap.py）：中小型股本土分點吃貨訊號＋回測摘要（Ultra 限定）
 
 一天合計約 3 次寫入（meta + days + hist），與追蹤幾檔股票幾乎無關。
 內容沒變就不寫（本地記錄 SHA-256），重跑腳本是 0 次寫入。
@@ -318,6 +320,16 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
         for f in sorted(fdir.glob("*.json")):
             doc_id = f.stem  # "2330@1y" 或 "_index@1y"
             docs[f"flow/{doc_id}"] = json.loads(f.read_text(encoding="utf-8"))
+
+    # 本土主力（mainforce.py）：每檔一份 force/{代號}（Ultra 限定）
+    mdir = DATA_DIR / "force" / date
+    if mdir.exists() and is_latest:
+        for f in sorted(mdir.glob("*.json")):
+            docs[f"force/{f.stem}"] = json.loads(f.read_text(encoding="utf-8"))
+    # 中小型吃貨（smallcap.py）：今天的訊號＋回測摘要，一份 smallcap/latest（Ultra 限定）
+    sfile = DATA_DIR / "smallcap" / f"{date}.json"
+    if sfile.exists() and is_latest:
+        docs["smallcap/latest"] = json.loads(sfile.read_text(encoding="utf-8"))
 
     # meta（最後寫）
     prev_dates = (prev_meta or {}).get("dates", [])

@@ -69,7 +69,7 @@ def site_latest_date(stock_id: str) -> str | None:
     """看富邦頁面的「最後更新日」，判斷今天的資料出來了沒"""
     f = scraper.RequestsFetcher(0.5, 1.0)
     try:
-        return scraper.parse_page(f.get(scraper.build_url(stock_id, None)), stock_id).get("date")
+        return scraper.parse_page(f.get(scraper.build_url(stock_id, None), only=scraper.FUBON_HOST), stock_id).get("date")
     finally:
         f.close()
 
@@ -118,8 +118,17 @@ def main(argv=None) -> int:
     ap.add_argument("--max-hours", type=float, help="最多跑幾小時（建檔時分批用；超時就停，下次接著跑）")
     ap.add_argument("--only-cached", action="store_true",
                     help="只算已建好 5 年資料的股票（雲端備援用：不在雲端做耗時的初次建檔）")
+    ap.add_argument("--stage", choices=STAGES, default="all",
+                    help="雲端分段接力（每段 < 6 小時）：download＝下載＋全分點反查＋Hit Ratio；edge＝Expectancy；"
+                         "flow＝Order Flow＋本土主力＋中小型吃貨＋整批上傳；all＝全部（本機）")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
+    if args.stage in ("edge", "flow"):
+        st = read_stage()
+        if st and not args.date:
+            args.date = st["day"]          # 接力：沿用第一段的日期與股票清單（跨過午夜也不會變）
+        if st and not args.stocks:
+            args.stocks = st["stocks"]
 
     log_path = setup_logging(args.verbose)
     target = dt.date.fromisoformat(args.date) if args.date else target_day()
@@ -186,13 +195,14 @@ def main(argv=None) -> int:
 
     import quant
     quant.HEARTBEAT = beat
-    beat("開始", force=True)
+    beat("開始" if args.stage == "all" else f"開始（{args.stage}）", force=True)
     try:
         return _run(args, target, db, paths, log_path, beat)
     finally:
         quant.HEARTBEAT = None
         lock.unlink(missing_ok=True)
-        if db is not None and not args.no_upload and not args.dry_run:
+        # 分段接力的前兩段：保留 meta/running（下一段幾分鐘內接手），避免備援機在空檔誤以為沒人在跑
+        if db is not None and not args.no_upload and not args.dry_run and args.stage in ("all", "flow"):
             try:
                 cur = db.collection("meta").document("running").get().to_dict() or {}
                 if cur.get("host") == me and cur.get("started") == started:
@@ -201,7 +211,27 @@ def main(argv=None) -> int:
                 pass
 
 
+STAGES = ("all", "download", "edge", "flow")
+
+
+def stage_file():
+    import paths
+    return paths.DATA_DIR / "_stage.json"
+
+
+def read_stage() -> dict | None:
+    try:
+        return json.loads(stage_file().read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
+    stage = getattr(args, "stage", "all")
+    do = {  # 哪一段做哪些事
+        "download": stage in ("all", "download"), "hit": stage in ("all", "download"),
+        "edge": stage in ("all", "edge"), "flow": stage in ("all", "flow"), "final": stage in ("all", "flow"),
+    }
     # 1) 今天要算哪些股票：Ultra 會員自選 → 成交值前 N 名
     if args.stocks:
         stocks = args.stocks
@@ -221,11 +251,12 @@ def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
     if not stocks:
         log.error("今天沒有要計算的股票（讀不到 Ultra 自選，也拿不到全市場成交值排行）")
         return 1
-    log.info("===== pipeline 開始：目標 %s，%d 檔，資料夾 %s，日誌 %s =====", target, len(stocks), paths.DATA_DIR, log_path)
+    log.info("===== pipeline 開始%s：目標 %s，%d 檔，資料夾 %s，日誌 %s =====", "" if stage == "all" else f"（{stage}）",
+             target, len(stocks), paths.DATA_DIR, log_path)
 
     try:
         # 1) 下載與清洗
-        if not args.upload_only:
+        if not args.upload_only and do["download"]:
             if args.wait_ready and not wait_until_ready(target, "2330", args.tries, args.interval):  # 用台積電判斷資料是否已更新
                 return 0
             res = scraper.run_job(stocks, target, min_delay=1.5, max_delay=3.5, skip_existing=not args.force,
@@ -239,8 +270,13 @@ def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
         if not day:
             log.error("data/ 中沒有資料可上傳")
             return 1
+        if stage == "download":   # 給下一段接力：日期與股票清單
+            stage_file().write_text(json.dumps({"day": day, "target": target.isoformat(), "stocks": stocks}, ensure_ascii=False), encoding="utf-8")
+        elif stage in ("edge", "flow") and not (scraper.DATA_DIR / day).exists():
+            log.error("找不到 %s 的下載資料，這一段不執行", day)
+            return 1
         # 1.2) 全分點反查：補上前 15 名以外的分點，並替其中淨買賣較大的建立 5 年明細（時間不夠就下次續跑）
-        if not args.upload_only and not args.no_sweep:
+        if not args.upload_only and not args.no_sweep and do["download"]:
             try:
                 import quant
                 import sweep
@@ -263,26 +299,43 @@ def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
                 log.exception("%s 先行上傳失敗（最後會再整批上傳一次）", name)
 
         if not args.no_quant:
-            try:
-                import quant
-                beat("Hit Ratio", force=True)
-                quant.run(day, stocks)
-                stage_upload("Hit Ratio")
-            except Exception:  # noqa: BLE001
-                log.exception("分點勝率計算失敗（主資料照常上傳）")
-            try:
-                import quant_edge
-                beat("Expectancy", force=True)
-                quant_edge.run(day, stocks)
-                stage_upload("Expectancy")
-            except Exception:  # noqa: BLE001
-                log.exception("Expectancy 計算失敗（主資料照常上傳）")
+            if do["hit"]:
+                try:
+                    import quant
+                    beat("Hit Ratio", force=True)
+                    quant.run(day, stocks)
+                    stage_upload("Hit Ratio")
+                except Exception:  # noqa: BLE001
+                    log.exception("分點勝率計算失敗（主資料照常上傳）")
+            if do["edge"]:
+                try:
+                    import quant_edge
+                    beat("Expectancy", force=True)
+                    quant_edge.run(day, stocks)
+                    stage_upload("Expectancy")
+                except Exception:  # noqa: BLE001
+                    log.exception("Expectancy 計算失敗（主資料照常上傳）")
+            if not do["flow"]:
+                log.info("===== 這一段（%s）完成，交給下一段 =====", stage)
+                return 0
             try:
                 import flowlab
                 beat("Order Flow", force=True)
                 flowlab.run(day, stocks)
             except Exception:  # noqa: BLE001
                 log.exception("Order Flow 計算失敗（主資料照常上傳）")
+            try:
+                import mainforce
+                beat("本土主力", force=True)
+                mainforce.run(day, stocks)
+            except Exception:  # noqa: BLE001
+                log.exception("本土主力計算失敗（主資料照常上傳）")
+            try:
+                import smallcap
+                beat("中小型吃貨", force=True)
+                smallcap.run(day, stocks)
+            except Exception:  # noqa: BLE001
+                log.exception("中小型吃貨計算失敗（主資料照常上傳）")
 
         if args.no_upload:
             log.info("--no-upload：略過上傳")
