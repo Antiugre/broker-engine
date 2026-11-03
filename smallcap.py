@@ -85,6 +85,7 @@ def capital_directory(max_age_days: int = 7) -> dict[str, dict]:
         except Exception as ex:  # noqa: BLE001
             log.info("股本資料 %s 失敗：%s", url, ex)
     if data:
+        data = {**((cached or {}).get("data") or {}), **data}   # 某一個市場（例如上櫃）抓失敗時，保留快取裡的舊資料
         CAP_FILE.parent.mkdir(parents=True, exist_ok=True)
         CAP_FILE.write_text(json.dumps({"t": time.time(), "data": data}, ensure_ascii=False), encoding="utf-8")
         return data
