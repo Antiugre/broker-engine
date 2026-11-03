@@ -28,7 +28,8 @@ KEEP_DAYS = 70
 def pack(out: Path) -> Path:
     days = sorted(p for p in DATA_DIR.glob("????-??-??") if p.is_dir())[-KEEP_DAYS:]
     with tarfile.open(out, "w:gz", compresslevel=6) as tar:
-        for name in ("longhist", "universe", "brokers.json", "company_info.json"):
+        for name in ("longhist", "universe", "brokers.json", "company_info.json",
+                     "capital.json", "fubon_branches.json", "zip3.csv"):   # 股本、券商分點清單、郵遞區號（雲端連上櫃公開資料偶爾失敗）
             p = DATA_DIR / name
             if p.exists():
                 tar.add(p, arcname=name)
