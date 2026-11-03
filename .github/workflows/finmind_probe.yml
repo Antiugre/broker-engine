@@ -1,0 +1,21 @@
+# FinMind 整天下載探測：只印方案額度與各資料集一天的大小、筆數、欄位（不存資料、不上傳任何東西）
+name: finmind-probe
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "交易日（YYYY-MM-DD）"
+        default: "2026-10-30"
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install requests pandas pyarrow
+      - env: { FINMIND_TOKEN: "${{ secrets.FINMIND_TOKEN }}" }
+        run: python tools/finmind_probe.py --date "${{ inputs.date }}"
