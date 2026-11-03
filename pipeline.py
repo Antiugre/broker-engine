@@ -341,16 +341,7 @@ def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
                 smallcap.run(day, stocks)
             except Exception:  # noqa: BLE001
                 log.exception("中小型吃貨計算失敗（主資料照常上傳）")
-            try:
-                import quant
-                from broker_flow import run as bf_run
-                from broker_flow.params import P as _bf
-                for sid in _bf.run.test_stocks:
-                    if (quant.LONG_DIR / sid / "_prices.json").exists():
-                        beat(f"主力集團 {sid}", force=True)
-                        bf_run.run(sid)
-            except Exception:  # noqa: BLE001
-                log.exception("主力集團偵測（測試版）失敗（主資料照常上傳）")
+            # 主力集團偵測（測試版）改由雲端第 4 段（tools/syndicate_now.py）計算：要全市場資料、計算量大
 
         if args.no_upload:
             log.info("--no-upload：略過上傳")

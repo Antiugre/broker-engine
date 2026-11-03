@@ -340,7 +340,7 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
             d = json.loads(f.read_text(encoding="utf-8"))
             if d.get("asof") == date:
                 docs[f"syndicate/{d['stock_id']}"] = d
-            idx.append({"id": d["stock_id"], "name": d.get("stock_name") or "", "asof": d.get("asof")})
+            idx.append({"id": d["stock_id"], "name": d.get("stock_name") or "", "asof": d.get("asof"), "kind": d.get("kind", "stock")})
         if idx:
             docs["syndicate/_index"] = {"stock_id": "_index", "stocks": idx}
 
