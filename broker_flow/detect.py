@@ -117,7 +117,10 @@ def attach_c(w: dict, pn: Panel, cres: dict | None) -> None:
     r["p_C"] = p_c
     r["dir_C"] = d_c
     # 8.2：p_meta = CCT(p_A, p_B, p_C) 各 1/3；p_B（B1、B2）沒有價位資料、無法計算 → 移除，剩下平分
-    r["p_meta"] = cct([r["p_A"], p_c], [1 / 3, 1 / 3]) if n else r["p_A"]
+    # SPEC-GAP（G-CAP）：合併前把各維度 p 截在 0.99。沒有進入任何跨股結構的配對 p_C = 1（平手的保守 p 值），
+    # CCT 遇到 p = 1 會得到 −∞ 而把維度 A 的強證據完全蓋掉（例如 p_A = 2e-10 → p_meta = 1）；與集團模式的 cct_many 同一處理
+    cap = lambda x: np.where(np.isfinite(x), np.minimum(x, 0.99), np.nan)  # noqa: E731
+    r["p_meta"] = cct([cap(r["p_A"]), cap(p_c)], [1 / 3, 1 / 3]) if n else r["p_A"]
 
 
 def pairs_table(pn: Panel, wins: list[dict]) -> pd.DataFrame:
