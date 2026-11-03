@@ -132,3 +132,111 @@ def test_planted_coactivity_detected():
     assert r["p_A"][k] < 1e-6
     q = bh(r["p_A"])
     assert (q <= 0.05).sum() <= 2
+
+
+def test_cp_apr_recovers_planted_structure():
+    """7 階段：CP-APR 能還原植入的低秩結構"""
+    from broker_flow.dim_c import cp_apr, fms, normalize
+    rng = np.random.default_rng(0)
+    I, J, K, R = 30, 12, 20, 2
+    U = np.zeros((I, R)); U[:10, 0] = 1; U[15:25, 1] = 1
+    V = np.zeros((J, R)); V[:4, 0] = 1; V[6:10, 1] = 1
+    W = np.zeros((K, R)); W[:10, 0] = 1; W[8:, 1] = 1
+    lam = np.einsum("ir,jr,kr->ijk", U, V, W) * 3
+    X = rng.poisson(lam + 0.01)
+    idx = np.argwhere(X > 0); val = X[X > 0].astype(float)
+    F, _ = cp_apr(idx, val, X.shape, R, rng)
+    _, Fn = normalize(F)
+    assert fms([U, V, W], Fn).max(axis=1).min() > 0.8
+
+
+def test_fraudar_finds_block_and_keeps_blocks_apart():
+    """7 階段：Fraudar 找出植入的稠密區塊，兩個獨立區塊的成員不會被配對；修正二：角色節點、反向配對記 dir_C"""
+    from broker_flow.dim_c import fraudar_blocks, s_fraudar
+    rng = np.random.default_rng(1)
+    # 區塊一：分點 0～3 的賣方角色（2i+1）＋分點 4～7 的買方角色（2i），同在股票 0～5 → 反向配合
+    E = {(2 * i + 1, j) for i in range(0, 4) for j in range(0, 6)} | {(2 * i, j) for i in range(4, 8) for j in range(0, 6)}
+    E |= {(2 * i, j) for i in range(20, 28) for j in range(10, 16)}          # 區塊二：另一群分點、另一批股票
+    E |= {(int(rng.integers(80, 400)), int(rng.integers(0, 40))) for _ in range(150)}
+    blocks = fraudar_blocks(sorted(E), 400, 40, 20)
+    tops = [set(b["left"]) for b in blocks[:2]]
+    assert {1, 3, 5, 7, 8, 10, 12, 14} in tops
+    conn = {i for i, j in E if j == 2}
+    sc = s_fraudar(blocks, 2, [0, 1, 4, 5, 25], conn)
+    assert all(4 not in k for k in sc)                                        # 分點 25（區塊二）不會和區塊一配對
+    assert any(o == 1 for (a, b), (v, o) in sc.items() if a < 2 <= b and v > 0)   # 賣方 0、1 對買方 4、5 → 反向
+
+
+def test_dim_a_two_sided_opposite():
+    """修正一：ρ ≈ −0.8 的配對得到顯著 p_mag，dir_A = opposite"""
+    rng = np.random.default_rng(7)
+    T, n = 120, 6
+    A = np.ones((n, T), bool)
+    Z = rng.normal(0, 1, (n, T))
+    Z[1] = -0.8 * Z[0] + 0.6 * rng.normal(0, 1, T)
+    F, ret = dim_a.day_factors(np.cumprod(1 + rng.normal(0, .02, T)) * 10, np.full(T, 1e6))
+    r = dim_a.run_window(A, Z, F, ret)
+    k = [i for i, (a, b) in enumerate(r["pairs"]) if (a, b) == (0, 1)][0]
+    assert r["p_mag"][k] < 1e-6 and r["dir_A"][k] == 1
+
+
+def test_cp_roles_opposite_and_same_shift():
+    """修正二：植入「A 賣方 + B 買方」的低秩結構可被還原且 dir_C = opposite"""
+    from broker_flow.dim_c import cp_apr, normalize
+    rng = np.random.default_rng(3)
+    nb, J, K = 20, 8, 30
+    U = np.zeros((2 * nb, 1)); U[2 * 0 + 1, 0] = 1; U[2 * 1, 0] = 1           # 分點 0 的賣方角色、分點 1 的買方角色
+    V = np.zeros((J, 1)); V[:3, 0] = 1
+    W = np.ones((K, 1))
+    X = rng.poisson(np.einsum("ir,jr,kr->ijk", U, V, W) * 3 + 0.02)
+    idx = np.argwhere(X > 0); val = X[X > 0].astype(float)
+    F, _ = cp_apr(idx, val, X.shape, 3, rng)
+    _, (u, v, w) = normalize(F)
+    k = int(np.argmax(u[1] * u[2]))                                           # 賣方 0（列 1）× 買方 1（列 2）
+    same = max(u[0, k] * u[2, k], u[1, k] * u[3, k])
+    assert u[1, k] * u[2, k] > 10 * same
+
+
+def test_group_pnl_loss_leg():
+    """修正四：S 虧錢、R 賺錢、VWAP 差 0.5% 內 → S 被標記為虧損腿；有 left_censored 成員時 pnl_incomplete"""
+    from broker_flow.detect import Context, group_pnl
+    T = 6
+    B = np.zeros((3, T)); S = np.zeros((3, T))
+    B[0, 0] = 100000; S[0, 3] = 100000             # S：10 元買、8 元賣 → 虧損
+    B[1, 3] = 100000                                # R：8 元承接，收盤 12 → 賺
+    S[2, 1] = 5000                                  # 超賣 → left_censored
+    pn = _panel(B, S, vwap=[10, 10, 10, 8, 10, 12])
+    cx = Context(pn)
+    r = group_pnl(cx, [0, 1], 0, T - 1)
+    assert r["loss_leg"] == [0] and r["total"] > 0 and not r["pnl_incomplete"]
+    assert group_pnl(cx, [0, 1, 2], 0, T - 1)["pnl_incomplete"]
+
+
+def test_exclude_foreign_candidates():
+    """修正規格第 1 節：exclude_foreign = true 時外資不出現在維度 A 的候選"""
+    from broker_flow.detect import Context, run_window
+    rng = np.random.default_rng(4)
+    B = rng.integers(0, 40, (4, 400)) * 1000.0
+    S = rng.integers(0, 40, (4, 400)) * 1000.0
+    pn = _panel(B, S, btype=["brokerage", "foreign", "brokerage", "brokerage"])
+    cx = Context(pn)
+    assert 1 in run_window(cx, 399)["cand"] and 1 not in run_window(cx, 399, exclude_foreign=True)["cand"]
+
+
+def test_null_pool_pvalues():
+    from broker_flow.nulls import Pool
+    pool = Pool()
+    pool.add(np.zeros(1000, int), np.arange(1000, dtype=float))
+    p, _ = pool.pvalues(np.zeros(3, int), np.array([0.0, 500.0, 999.0]))
+    assert p[0] == pytest.approx(1.0, abs=1e-12) and p[1] == pytest.approx(501 / 1001)
+    assert p[2] <= 2 / 1001                                 # 超過第 99 百分位 → GPD 外推
+
+
+def test_group_merge_and_lfdr():
+    from broker_flow.group import cct_many, lfdr
+    assert cct_many([1.0, 1.0, 1e-8]) < 1e-6                 # p = 1 不會蓋掉強證據
+    rng = np.random.default_rng(2)
+    null = rng.random(3000)
+    real = np.r_[rng.random(80), np.full(5, 1e-9)]
+    prob = lfdr(real, null)
+    assert prob[-5:].min() > 0.5 and np.nanmedian(prob[:80]) < 0.3
