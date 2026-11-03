@@ -437,6 +437,11 @@ def run_job(stock_ids: list[str], target: dt.date | None = None, *, engine: str 
     def worker(items, fetcher):
         try:
             while not stop.is_set():
+                if getattr(fetcher, "prefer", None) and len(hosts) > 1:
+                    mine = next((h for h in fetcher.hosts if h.base == fetcher.prefer), None)
+                    if mine and mine.fails >= 3:   # 自己負責的那站連不上 → 這個工作停下，剩下的交給另一站（不讓兩個工作同時打同一站）
+                        log.info("%s 連續失敗，這個下載工作停止，由另一站接手", fetcher.prefer.split("//")[1])
+                        return
                 with lock:
                     if not items:
                         return
