@@ -23,7 +23,11 @@ def main() -> int:
     docs = []
     for sid in stocks:
         d = bf.run(sid)
-        docs.append((f"syndicate/{sid}", d))
+        if d:
+            docs.append((f"syndicate/{sid}", d))
+    if not docs:
+        logging.getLogger("broker_scraper").error("沒有算出結果（資料不足）")
+        return 1
     docs.append(("syndicate/_index", {"stock_id": "_index", "stocks": [{"id": d["stock_id"], "name": d.get("stock_name") or "", "asof": d["asof"]} for _, d in docs]}))
     _commit(get_client(), docs, label="1/1")
     logging.getLogger("broker_scraper").info("完成：%s 已上傳", "、".join(stocks))
