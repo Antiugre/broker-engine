@@ -3,7 +3,7 @@
   A1 活躍共現：logistic（分點固定效果 + 當日因子，L2，C=10）→ 每日活躍機率 → 共同活躍天數的
      Poisson-binomial 精確右尾 p_act（動態規劃）
   A2 幅度相關：每個分點只用活躍日，把 z_net 對（報酬率、log 成交量）做 OLS 取殘差；
-     共同活躍日 n ≥ 20 時 Spearman ρ 的單尾 p 值（t 近似，自由度 n − 2）
+     共同活躍日 n ≥ 20 時 Spearman ρ 的雙尾 p 值（修正一；t 近似，自由度 n − 2），並記錄方向 dir_A
   p_A = CCT(p_act, p_mag)，各 1/2；p_mag 缺失時 p_A = p_act
 
 SPEC-GAP：當日因子少了「振幅」（沒有最高、最低價）；因子不做標準化（規格未要求）
@@ -69,9 +69,11 @@ def residuals(Z: np.ndarray, A: np.ndarray, ret: np.ndarray, F: np.ndarray) -> n
     return E
 
 
-def p_magnitude(E: np.ndarray, A: np.ndarray, pairs: np.ndarray) -> np.ndarray:
+def p_magnitude(E: np.ndarray, A: np.ndarray, pairs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """修正一：雙尾檢定 p_mag = min(1, 2·min(p_pos, p_neg))；回傳 (p_mag, ρ)（ρ < 0 → dir_A = opposite）"""
     nmin = int(P.detection.mag_min_common)
     out = np.full(len(pairs), np.nan)
+    rhos = np.full(len(pairs), np.nan)
     for k, (i, j) in enumerate(pairs):
         d = A[i] & A[j]
         n = int(d.sum())
@@ -80,10 +82,12 @@ def p_magnitude(E: np.ndarray, A: np.ndarray, pairs: np.ndarray) -> np.ndarray:
         rho = stats.spearmanr(E[i, d], E[j, d]).statistic
         if not np.isfinite(rho):
             continue
-        rho = min(rho, 1 - 1e-12)
+        rho = float(np.clip(rho, -1 + 1e-12, 1 - 1e-12))
         t = rho * np.sqrt((n - 2) / (1 - rho * rho))
-        out[k] = stats.t.sf(t, n - 2)
-    return out
+        p_pos, p_neg = stats.t.sf(t, n - 2), stats.t.cdf(t, n - 2)
+        out[k] = min(1.0, 2 * min(p_pos, p_neg))
+        rhos[k] = rho
+    return out, rhos
 
 
 def run_window(A: np.ndarray, Z: np.ndarray, F: np.ndarray, ret: np.ndarray) -> dict:
@@ -95,7 +99,8 @@ def run_window(A: np.ndarray, Z: np.ndarray, F: np.ndarray, ret: np.ndarray) -> 
     obs = (A[ii] & A[jj]).sum(axis=1)
     p_act = clip(poisson_binomial_sf(p[ii] * p[jj], obs))
     E = residuals(Z, A, ret, F)
-    p_mag = p_magnitude(E, A, pairs)
+    p_mag, rho = p_magnitude(E, A, pairs)
     p_mag = np.where(np.isfinite(p_mag), clip(np.nan_to_num(p_mag, nan=0.5)), np.nan)
     p_A = cct([p_act, p_mag], [0.5, 0.5])
-    return {"pairs": pairs, "obs": obs, "p_act": p_act, "p_mag": p_mag, "p_A": p_A, "prob": p}
+    dir_A = np.where(np.isfinite(rho), np.where(rho >= 0, 0, 1), -1).astype(np.int8)   # 0 same、1 opposite、-1 無
+    return {"pairs": pairs, "obs": obs, "p_act": p_act, "p_mag": p_mag, "p_A": p_A, "dir_A": dir_A, "prob": p}

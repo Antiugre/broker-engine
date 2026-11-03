@@ -57,7 +57,7 @@ def calibration(cx: Context, ends: list[int], seed: int = 0, max_windows: int = 
 
 
 def _subpanel(pn: Panel, lo: int, hi: int) -> Panel:
-    return Panel(pn.sid, pn.dates[lo:hi + 1], list(pn.branches), list(pn.names), list(pn.btype),
+    return Panel(pn.sid + "~syn", pn.dates[lo:hi + 1], list(pn.branches), list(pn.names), list(pn.btype),
                  pn.B[:, lo:hi + 1].copy(), pn.S[:, lo:hi + 1].copy(), pn.close[lo:hi + 1], pn.vwap[lo:hi + 1],
                  pn.volume[lo:hi + 1], hi - lo + 1)
 
