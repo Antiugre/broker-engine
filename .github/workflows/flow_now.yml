@@ -1,0 +1,72 @@
+# Order Flow 立即重算（不必等每日流程的 Expectancy）：
+#   拿指定 daily-pipeline 執行的第 ① 段資料（artifact state-download），只跑第 ③ 段（Order Flow＋本土主力＋中小型吃貨＋上傳）
+#   不更新長期資料快取（避免和每日流程互相覆蓋）；每日流程自己的第 ③ 段之後會再算一次、結果相同
+name: flow-now
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "daily-pipeline 的執行編號（取它第 ① 段的資料）；空白＝用長期資料快取"
+        required: false
+      date:
+        description: "指定日期 YYYY-MM-DD（空白＝沿用第 ① 段的日期）"
+        required: false
+      stocks:
+        description: "只算這些股票（空白＝沿用第 ① 段的清單）"
+        required: false
+
+concurrency:
+  group: flow-now
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  TZ: Asia/Taipei
+  BB_DATA_DIR: ${{ github.workspace }}/data
+  BB_ROLE: cloud
+  BB_MIRRORS: fubon
+  FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+  GH_TOKEN: ${{ github.token }}
+  PYTHONUTF8: "1"
+
+jobs:
+  flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: FinMind 分點資料（私人倉庫 broker-data；放在 data/ 以外）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+            echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
+          else echo "FinMind 資料下載失敗"; exit 1; fi
+      - name: 取得資料
+        run: |
+          if [ -n "${{ inputs.run_id }}" ] && gh run download "${{ inputs.run_id }}" -n state-download -D st; then tar -xf st/state.tar
+          else gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz; fi
+      - name: Firebase 金鑰
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: ③ Order Flow＋本土主力＋中小型吃貨＋上傳
+        run: |
+          ARGS="--stage flow --max-hours 2.8"
+          [ -n "${{ inputs.date }}" ] && ARGS="$ARGS --date ${{ inputs.date }}"
+          [ -n "${{ inputs.stocks }}" ] && ARGS="$ARGS --stocks ${{ inputs.stocks }}"
+          python pipeline.py $ARGS
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: logs-flownow-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
