@@ -101,6 +101,7 @@ dim_c:
   ext_min_shares: 10000
   max_tensor_nnz: 5000000          # v3.1：擬合前先數非零格數，超過就停止並回報，不自行調整門檻
   chunk_rows: 500000               # v3.1：乘法更新分塊列數
+  null_pairs: 5000                 # SPEC-GAP-v3（記憶體）：每檔股票每次虛無抽樣的配對數
   max_missing_week_frac: 0.5
   fit_weeks: 104
   refit_weeks: 13
