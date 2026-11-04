@@ -43,6 +43,19 @@ class Context:
         self.F, self.ret = dim_a.day_factors(pn.close, pn.volume)
 
     @property
+    def levels(self):
+        """維度 B 用的每日價位明細（FinMind）；沒有 → None"""
+        if not hasattr(self, "_lv"):
+            from . import dim_b
+            try:
+                self._lv = dim_b.levels(self.pn)
+            except Exception as ex:  # noqa: BLE001
+                import logging
+                logging.getLogger("broker_scraper").warning("維度 B 價位明細讀取失敗（%s）：本次不計算維度 B", ex)
+                self._lv = None
+        return self._lv
+
+    @property
     def L(self):
         if self._L is None:
             self._L = accounting.run(self.pn)
@@ -66,21 +79,63 @@ def run_window(cx: Context, e: int, allow_holdout: bool = False, exclude_foreign
     if len(cand) < 2:
         out["res"] = None
         return out
-    out["res"] = _dim_a_cached(cx, e, cand)
-    out["res"]["p_meta"] = out["res"]["p_A"]          # 維度 C 之後由 attach_c 併入
+    out["res"] = dict(_dim_a_cached(cx, e, cand))
+    rb = _dim_b_cached(cx, out)                         # 維度 B（FinMind 價位明細；沒有 → 缺失）
+    nP = len(out["res"]["pairs"])
+    if rb and "p_B" in rb:
+        out["res"].update({k: rb[k] for k in ("p_B1", "p_B2", "p_B", "T_B1", "T_B2", "seller", "buyer")})
+    else:
+        out["res"].update({"p_B1": np.full(nP, np.nan), "p_B2": np.full(nP, np.nan), "p_B": np.full(nP, np.nan)})
+    out["b_days"] = (rb or {}).get("days", 0)
+    out["b_violation_days"] = (rb or {}).get("violation_days", 0)
+    out["res"]["p_meta"] = _meta(out["res"]["p_A"], out["res"]["p_B"], None)   # 維度 C 之後由 attach_c 併入
     return out
+
+
+def _meta(p_a, p_b, p_c) -> np.ndarray:
+    """8.2：p_meta = CCT(p_A, p_B, p_C) 各 1/3；缺的維度移除、其餘平分。合併前把 p 截在 0.99（SPEC-GAP G-CAP）"""
+    cap = lambda x: np.where(np.isfinite(x), np.minimum(x, 0.99), np.nan)  # noqa: E731
+    ps = [cap(np.asarray(p_a, float))]
+    for x in (p_b, p_c):
+        if x is not None:
+            ps.append(cap(np.asarray(x, float)))
+    return cct(ps, [1 / 3] * len(ps))
+
+
+def _win_hash(cx: Context, e: int, cand: list[int]) -> str:
+    pn = cx.pn
+    W = int(P.detection.window_days)
+    lo = max(0, e - W - int(P.behavior.rolling_days) + 1)
+    h = hashlib.sha256()
+    h.update(("|".join(pn.branches[i] for i in cand)).encode())
+    h.update(np.ascontiguousarray(pn.B[:, lo:e + 1]).tobytes()); h.update(np.ascontiguousarray(pn.S[:, lo:e + 1]).tobytes())
+    h.update(np.ascontiguousarray(pn.close[lo:e + 1]).tobytes()); h.update(np.ascontiguousarray(pn.volume[lo:e + 1]).tobytes())
+    return h.hexdigest()[:16]
+
+
+def _dim_b_cached(cx: Context, w: dict) -> dict | None:
+    """維度 B 結果按（股票、窗口、資料指紋）存檔；沒有價位明細 → None（不存檔）"""
+    from . import dim_b
+    lv = cx.levels
+    if lv is None:
+        return None
+    pn, e = cx.pn, w["end"]
+    f = CACHE_A.parent / "dim_b" / pn.sid / f"{pn.dates[e]}_{_win_hash(cx, e, w['cand'])}.pkl"
+    if f.exists():
+        return pickle.loads(f.read_bytes())
+    rb = dim_b.window(cx, w, lv)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    for old in f.parent.glob(f"{pn.dates[e]}_*.pkl"):
+        old.unlink()
+    f.write_bytes(pickle.dumps(rb))
+    return rb
 
 
 def _dim_a_cached(cx: Context, e: int, cand: list[int]) -> dict:
     pn = cx.pn
     W = int(P.detection.window_days)
     s = e - W + 1
-    lo = max(0, e - W - int(P.behavior.rolling_days) + 1)
-    h = hashlib.sha256()
-    h.update(("|".join(pn.branches[i] for i in cand)).encode())
-    h.update(np.ascontiguousarray(pn.B[:, lo:e + 1]).tobytes()); h.update(np.ascontiguousarray(pn.S[:, lo:e + 1]).tobytes())
-    h.update(np.ascontiguousarray(pn.close[lo:e + 1]).tobytes()); h.update(np.ascontiguousarray(pn.volume[lo:e + 1]).tobytes())
-    f = CACHE_A / pn.sid / f"{pn.dates[e]}_{h.hexdigest()[:16]}.pkl"
+    f = CACHE_A / pn.sid / f"{pn.dates[e]}_{_win_hash(cx, e, cand)}.pkl"
     if f.exists():
         return pickle.loads(f.read_bytes())
     res = dim_a.run_window(cx.active[cand, s:e + 1], cx.z[cand, s:e + 1], cx.F[s:e + 1], cx.ret[s:e + 1])
@@ -118,9 +173,8 @@ def attach_c(w: dict, pn: Panel, cres: dict | None) -> None:
     r["dir_C"] = d_c
     # 8.2：p_meta = CCT(p_A, p_B, p_C) 各 1/3；p_B（B1、B2）沒有價位資料、無法計算 → 移除，剩下平分
     # SPEC-GAP（G-CAP）：合併前把各維度 p 截在 0.99。沒有進入任何跨股結構的配對 p_C = 1（平手的保守 p 值），
-    # CCT 遇到 p = 1 會得到 −∞ 而把維度 A 的強證據完全蓋掉（例如 p_A = 2e-10 → p_meta = 1）；與集團模式的 cct_many 同一處理
-    cap = lambda x: np.where(np.isfinite(x), np.minimum(x, 0.99), np.nan)  # noqa: E731
-    r["p_meta"] = cct([cap(r["p_A"]), cap(p_c)], [1 / 3, 1 / 3]) if n else r["p_A"]
+    # CCT 遇到 p = 1 會得到 −∞ 而把其他維度的強證據完全蓋掉（例如 p_A = 2e-10 → p_meta = 1）；與集團模式的 cct_many 同一處理
+    r["p_meta"] = _meta(r["p_A"], r.get("p_B"), p_c if n else None)
 
 
 def pairs_table(pn: Panel, wins: list[dict]) -> pd.DataFrame:
@@ -137,7 +191,10 @@ def pairs_table(pn: Panel, wins: list[dict]) -> pd.DataFrame:
             "ia": a, "ib": b, "branch_a": np.array(pn.branches)[a], "branch_b": np.array(pn.branches)[b],
             "obs": r["obs"], "p_act": r["p_act"], "p_mag": r["p_mag"], "p_A": r["p_A"],
             "dir_A": np.array(["same", "opposite", ""])[r.get("dir_A", np.full(len(a), -1))],
-            "p_B1": np.nan, "p_B2": np.nan, "p_B": np.nan, "seller": "", "buyer": "",
+            "p_B1": r.get("p_B1", np.full(len(a), np.nan)), "p_B2": r.get("p_B2", np.full(len(a), np.nan)),
+            "p_B": r.get("p_B", np.full(len(a), np.nan)),
+            "seller": np.array(pn.branches)[c[r["seller"]]] if "seller" in r else "",
+            "buyer": np.array(pn.branches)[c[r["buyer"]]] if "buyer" in r else "",
             "p_C": r.get("p_C", np.full(len(a), np.nan)),
             "dir_C": np.array(["same", "opposite", ""])[r.get("dir_C", np.full(len(a), -1))],
             "p_meta": r.get("p_meta", r["p_A"])}))
@@ -145,7 +202,7 @@ def pairs_table(pn: Panel, wins: list[dict]) -> pd.DataFrame:
     if len(df):
         df["q_meta"] = bh(df["p_meta"])
         df["q_A"] = bh(df["p_A"])
-        df["q_B"] = np.nan
+        df["q_B"] = bh(df["p_B"]) if df["p_B"].notna().any() else np.nan
         df["q_C"] = bh(df["p_C"])
     return df
 
@@ -169,7 +226,7 @@ def groups_for(cx: Context, w: dict, sig: pd.DataFrame) -> list[dict]:
 
 def group_pnl(cx: Context, g: list[int], s: int, e: int) -> dict:
     """修正四 6.1、6.2：集團損益（只計 left_censored = False 的成員）與虧損腿
-    SPEC-GAP：沒有分點的買進／賣出均價 → 以個股當日 VWAP、用各成員自己的買（賣）量加權，算出窗口內買進／賣出均價"""
+    窗口內買進／賣出均價：FinMind 有分點自己的每日買／賣均價 → 以成交量加權；富邦備用路徑沒有 → 個股當日 VWAP 代替（SPEC-GAP）"""
     pn, L = cx.pn, cx.L
     ok = [i for i in g if not L["left_censored"][i, e]]
     real = {i: float(L["realized"][i, s:e + 1].sum() + L["dt_pnl"][i, s:e + 1].sum()) for i in g}
@@ -177,11 +234,13 @@ def group_pnl(cx: Context, g: list[int], s: int, e: int) -> dict:
     rp = sum(real[i] for i in ok)
     up = sum(unreal[i] for i in ok)
     vw = pn.vwap[s:e + 1]
+    BP, SP = pn.meta.get("buy_price"), pn.meta.get("sell_price")
 
-    def avg(x):
-        return float((x * vw).sum() / x.sum()) if x.sum() > 0 else None
-    buy_v = {i: avg(pn.B[i, s:e + 1]) for i in g}
-    sell_v = {i: avg(pn.S[i, s:e + 1]) for i in g}
+    def avg(x, px):
+        p = vw if px is None else np.where(np.isfinite(px), px, vw)
+        return float((x * p).sum() / x.sum()) if x.sum() > 0 else None
+    buy_v = {i: avg(pn.B[i, s:e + 1], None if BP is None else BP[i, s:e + 1]) for i in g}
+    sell_v = {i: avg(pn.S[i, s:e + 1], None if SP is None else SP[i, s:e + 1]) for i in g}
     tol = float(P.revision.loss_leg_vwap_tol)
     loss = []
     if rp + up >= 0:

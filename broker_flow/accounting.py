@@ -1,8 +1,9 @@
 """
 第 4 節 會計層：當沖拆分 → 淨量進庫存（移動平均成本）→ 已實現損益
 
-SPEC-GAP（本資料源）
-  - 沒有分點的買進／賣出 VWAP：vb、vs 都用個股當日 VWAP 代替 → 當沖損益只剩交易成本
+資料來源
+  - FinMind（Sponsor Pro）有分點的當日買進／賣出均價 → vb、vs 用分點自己的均價（規格 4.1）
+  - 富邦備用路徑沒有分點均價：vb、vs 用個股當日 VWAP 代替（SPEC-GAP）→ 當沖損益只剩交易成本
   - 沒有公司行動資料表：4.2 的除權息、減資調整本版不做（成本不扣現金股利）
   - 規格 4.1 的成本公式未把買進手續費併入成本，照字面實作（手續費只在賣出與當沖扣）
 """
@@ -23,9 +24,13 @@ def run(pn: Panel) -> dict[str, np.ndarray]:
     inv = np.zeros(n); cost = np.zeros(n); cens = np.zeros(n, bool)
     out = {k: np.zeros((n, T)) for k in ("inventory", "avg_cost", "realized", "dt", "dt_pnl", "net", "uncovered")}
     out["left_censored"] = np.zeros((n, T), bool)
+    BP, SP = pn.meta.get("buy_price"), pn.meta.get("sell_price")
     for t in range(T):
         b, s = pn.B[:, t], pn.S[:, t]
-        vb = vs = pn.vwap[t]
+        vb = vs = np.full(n, pn.vwap[t])
+        if BP is not None:                    # 分點自己的買／賣均價；沒有的格子用個股 VWAP
+            vb = np.where(np.isfinite(BP[:, t]), BP[:, t], pn.vwap[t])
+            vs = np.where(np.isfinite(SP[:, t]), SP[:, t], pn.vwap[t])
         dt = np.minimum(b, s)
         out["dt"][:, t] = dt
         out["dt_pnl"][:, t] = dt * (vs - vb) - (dt * vb * fee + dt * vs * (fee + tax_dt))
@@ -55,9 +60,12 @@ def run(pn: Panel) -> dict[str, np.ndarray]:
 def to_table(pn: Panel, L: dict) -> pd.DataFrame:
     """4.5 輸出 ledger（長表；只留有交易或有庫存的格子）"""
     i, t = np.nonzero((pn.B + pn.S > 0) | (L["inventory"] > 0))
+    BP, SP = pn.meta.get("buy_price"), pn.meta.get("sell_price")
+    vb = np.where(np.isfinite(BP[i, t]), BP[i, t], pn.vwap[t]) if BP is not None else pn.vwap[t]
+    vs = np.where(np.isfinite(SP[i, t]), SP[i, t], pn.vwap[t]) if SP is not None else pn.vwap[t]
     return pd.DataFrame({
         "date": pn.dates[t], "stock_id": pn.sid, "branch_id": np.array(pn.branches)[i],
-        "buy": pn.B[i, t], "sell": pn.S[i, t], "vwap_buy": pn.vwap[t], "vwap_sell": pn.vwap[t],
+        "buy": pn.B[i, t], "sell": pn.S[i, t], "vwap_buy": vb, "vwap_sell": vs,
         "dt": L["dt"][i, t], "dt_pnl": L["dt_pnl"][i, t], "net": L["net"][i, t],
         "inventory": L["inventory"][i, t], "avg_cost": L["avg_cost"][i, t], "realized_pnl": L["realized"][i, t],
         "uncovered_sell": L["uncovered"][i, t], "left_censored": L["left_censored"][i, t]})

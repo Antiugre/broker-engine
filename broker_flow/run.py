@@ -27,16 +27,14 @@ MIN_BRANCHES = 20      # 分點少於這個數不產出（SPEC-GAP：規格未�
 MIN_MARKET = 30        # 全市場少於這麼多檔就不算維度 C
 
 SPEC_GAPS = [
-    ("資料粒度", "本專案只有「日期 × 分點」買賣張數，沒有成交價位 → 3.3 守恆檢查、維度 B（冷門價位共現）、5.3 Wasserstein 無法計算"),
-    ("全市場", "維度 C 用 longhist 有建檔的全部股票當「全市場」（不是證交所全部上市櫃）；過去窗口的結果算過就存檔，以當時的市場資料為準"),
-    ("分點範圍", "longhist 只含曾進前 15 名或全分點反查補進的分點，不是全部分點"),
+    ("資料來源", "分點資料優先用 FinMind（Sponsor Pro，2021-06-30 起，全部分點、價位明細、分點買賣均價）；拿不到時改用富邦（只有買賣張數，維度 B 不計算）"),
+    ("全市場", "維度 C 用雲端每晚計算範圍內有價格資料的股票當「全市場」（不是證交所全部上市櫃）；過去窗口的結果算過就存檔，以當時的市場資料為準"),
     ("開高低價", "沒有開盤、最高、最低價 → 6.1 少了「振幅」因子；9.4 事件定義（下影線、紅 K）無法判斷"),
-    ("分點成交均價", "沒有分點的買進／賣出 VWAP，會計層以個股當日 VWAP 代替"),
     ("公司行動", "沒有除權息、減資資料表，4.2 的成本調整未做"),
-    ("集保、判決書", "9.1 集保級距、9.2 判決書驗證所需資料尚未取得"),
-    ("排除外資", "exclude_foreign 預設關閉；開啟時外資不當維度 A 候選，維度 C 只把外資配對拿掉（張量與圖照常含外資）"),
-    ("維度 B2", "壓價轉移的事件日第 4 個條件（價位重疊）需要分點價位明細或分點均價，本資料源沒有 → B2 不計算；集團承接比例（5.6）只用條件 1、2，照常報告"),
-    ("集團損益", "沒有分點的買進／賣出均價，以個股當日 VWAP、用各成員自己的買（賣）量加權代替（虧損腿的 1% 容差用這個比）"),
+    ("集保、判決書", "9.1 集保級距、9.2 判決書驗證所需資料尚未接上"),
+    ("排除外資", "exclude_foreign 預設關閉；開啟時外資不當維度 A、B 候選（B2 的外資賣方因此也看不到，與修正規格 5.3 不同），維度 C 只把外資配對拿掉"),
+    ("維度 B1", "「下界計分」只在參與成立的價位才加分；排列只在候選分點之間置換"),
+    ("合併截斷", "合併前把各維度 p 值上限截在 0.99（p = 1 會讓 CCT 蓋掉其他維度的強證據）"),
     ("hold-out", "網頁的即時監看需要顯示最近 12 個月（hold-out）窗口，執行時明確傳 allow_holdout=True；驗證統計只用 hold-out 之前"),
 ]
 
@@ -120,6 +118,8 @@ def run(sid: str, quick: bool = False, seed: int = 0, mk=None, ctx: dict | None 
                 "holdout": bool(e >= pn.holdout_start), "candidates": len(w0["cand"]),
                 "pairs": int((variants["all"][1]["window_id"] == k).sum()) if len(variants["all"][1]) else 0,
                 "has_c": bool(w0["res"] is not None and np.isfinite(w0["res"].get("p_C", np.array([np.nan]))).any()),
+                "has_b": bool(w0["res"] is not None and np.isfinite(w0["res"].get("p_B", np.array([np.nan]))).any()),
+                "b_days": int(w0.get("b_days", 0)), "b_violation_days": int(w0.get("b_violation_days", 0)),
                 "close": _r(pn.close[e], 2)}
         for var, (vw, pt) in variants.items():
             w = vw[k]
@@ -144,8 +144,11 @@ def run(sid: str, quick: bool = False, seed: int = 0, mk=None, ctx: dict | None 
                 v["naive"] = {"members": [mem(i) for i in naive["members"]], "C_G": _r(naive["C_G"], 2),
                               "inv": round(naive["inventory_G"] / 1000), "net20": round(naive["net_20"] / 1000)}
                 top = sig.nsmallest(15, "p_meta") if len(sig) else sig
+                nm = dict(zip(pn.branches, pn.names))
                 v["top_pairs"] = [{"a": pn.names[int(r.ia)], "b": pn.names[int(r.ib)], "obs": int(r.obs),
                                    "p_act": f3(r.p_act), "p_mag": f3(r.p_mag), "p_A": f3(r.p_A), "p_C": f3(r.p_C),
+                                   "p_B1": f3(r.p_B1), "p_B2": f3(r.p_B2), "p_B": f3(r.p_B),
+                                   "seller": nm.get(r.seller, "") if r.seller else "", "buyer": nm.get(r.buyer, "") if r.buyer else "",
                                    "dir_A": r.dir_A, "dir_C": r.dir_C, "p": f3(r.p_meta), "q": f3(r.q_meta)} for r in top.itertuples()]
             item[var] = v
         windows.append(item)
@@ -155,7 +158,7 @@ def run(sid: str, quick: bool = False, seed: int = 0, mk=None, ctx: dict | None 
     syn = synthetic(cx, ends, seed=seed, reps=3 if quick else None,
                     Ks=[2, 3] if quick else None, rhos=[1.0, 0.5] if quick else None)
     doc = {"stock_id": sid, "kind": "stock", "stock_name": _name(sid), "asof": str(pn.dates[-1]), "params_version": P.version,
-           "exclude_foreign_default": bool(P.exclude_foreign),
+           "exclude_foreign_default": bool(P.exclude_foreign), "source": pn.meta.get("source", "fubon"),
            "quick": quick, "market": len(mk.sids) if mk else 0,
            "data": {"start": str(pn.dates[0]), "end": str(pn.dates[-1]), "days": len(pn.dates), "branches": len(pn.branches),
                     "holdout_start": str(pn.dates[pn.holdout_start]),
