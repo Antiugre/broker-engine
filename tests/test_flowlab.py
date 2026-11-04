@@ -26,8 +26,10 @@ def ctx_of(hist, prices=None, meta=None, company=None, params=None):
     return sources.build_context("9999", DATES[-1], branches, hist, prices or mkprices(), company, {}, params or {})
 
 
-def rows(pairs):
-    return [{"date": DATES[i], "buy": b, "sell": s} for i, b, s in pairs]
+def rows(pairs, price=None):
+    """price：第 i 日的分點真實買進均價（成本區只用真實價格；None → 不給價格）"""
+    return [{"date": DATES[i], "buy": b, "sell": s, **({"buy_price": float(price[i])} if price is not None and b > 0 else {})}
+            for i, b, s in pairs]
 
 
 # ── 模組一 ──
@@ -109,7 +111,7 @@ def test_geo_matcher_zip_district_city():
 # ── 模組三 ──
 def test_cost_zone_series_is_plain_json_and_weighted():
     close = np.linspace(100, 120, N)
-    stable = rows([(i, 100, 5) for i in range(170, 200) if i % 5 != 0])
+    stable = rows([(i, 100, 5) for i in range(170, 200) if i % 5 != 0], close)
     doc = flowlab.analyse_context(ctx_of({"lock": stable}, mkprices(close)))
     z = doc["zones"]
     s = z["series"][-1]
@@ -154,7 +156,7 @@ def test_document_schema_and_index():
 
 def test_horizon_slice_keeps_warmup_but_trims_output():
     close = np.linspace(100, 130, N)
-    stable = rows([(i, 100, 5) for i in range(100, 200) if i % 5 != 0])
+    stable = rows([(i, 100, 5) for i in range(100, 200) if i % 5 != 0], close)
     full = ctx_of({"lock": stable}, mkprices(close))
     start = DATES[150]
     sub = full.slice(start, warmup=40, horizon="3m")
