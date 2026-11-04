@@ -54,9 +54,11 @@ def run(day: str, stocks: list[str], fetcher=None, params: dict | None = None) -
                 full = extract_context(fetcher, sid, day, params)
                 if full is None:
                     continue
+                from .costs import attach, holding_costs
+                hc = holding_costs(full)                 # 分點持股成本：用完整歷史算一次，各範圍共用
                 for h, days in quant.HORIZONS.items():  # 同一份資料，依各分析範圍各產出一份文件
                     start = (dt.date.fromisoformat(day) - dt.timedelta(days=days)).isoformat()
-                    doc = analyse_context(full.slice(start, horizon=h))
+                    doc = attach(analyse_context(full.slice(start, horizon=h)), hc)
                     (out_dir / f"{sid}@{h}.json").write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
                     indexes[h]["stocks"][sid] = index_entry(doc)
             except Exception as ex:  # noqa: BLE001
