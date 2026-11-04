@@ -327,6 +327,7 @@ def _run(args, target, db, paths, log_path, beat=lambda *a, **k: None) -> int:
                 import flowlab
                 beat("Order Flow", force=True)
                 flowlab.run(day, stocks)
+                stage_upload("Order Flow")          # 先上傳 Order Flow，不必等本土主力／中小型吃貨
             except Exception:  # noqa: BLE001
                 log.exception("Order Flow 計算失敗（主資料照常上傳）")
             try:
