@@ -372,6 +372,30 @@ def _stagger(key: str, max_age: int) -> int:
     return 3 + zlib.crc32(key.encode()) % (max_age - 2)
 
 
+def _from_finmind(sid: str, key: str, today: dt.date, end: dt.date, extra_rows: list[dict] | None) -> list[dict] | None:
+    """FinMind 分點歷史（fm_store）；FinMind 最後一天之後的日子用每日排行頁的張數補（與富邦路徑相同做法）。
+    None ＝ 不能用（沒有資料、太舊、對不到分點）→ 呼叫端改走富邦"""
+    try:
+        import fm_store
+        rows = fm_store.history(sid, key, today - dt.timedelta(days=LONG_DAYS), end)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("FinMind 分點歷史讀取失敗（%s），改走富邦", ex)
+        return None
+    if rows is None:
+        return None
+    last = fm_store.last_date() or ""
+    prov = {}
+    for p in DATA_DIR.glob("????-??-??"):
+        if last < p.name <= end.isoformat():
+            r = _listed(sid, p.name).get(key)
+            if r:
+                prov[r["date"]] = r
+    for r in extra_rows or []:
+        if r["date"] > last:
+            prov[r["date"]] = {"date": r["date"], "buy": r["buy"], "sell": r["sell"]}
+    return sorted({**{r["date"]: r for r in rows}, **prov}.values(), key=lambda r: r["date"])
+
+
 def load_branch_history(fetcher, sid: str, row: dict, end: dt.date, today: dt.date | None = None,
                         max_age: int | None = None, extra_rows: list[dict] | None = None) -> list[dict]:
     """
@@ -383,6 +407,9 @@ def load_branch_history(fetcher, sid: str, row: dict, end: dt.date, today: dt.da
 
     today = today or end
     key = history_key(row)
+    fm_rows = _from_finmind(sid, key, today, end, extra_rows)
+    if fm_rows is not None:          # FinMind（Sponsor Pro）優先；拿不到才走下面原本的富邦路徑（保留作備用）
+        return fm_rows
     path = LONG_DIR / sid / f"{key}.json"
     cache = _read(path) or {}
     floor = today - dt.timedelta(days=LONG_DAYS)
@@ -476,9 +503,22 @@ def range_record(fetcher, sid: str, day: str, days: int = 30) -> dict:
     hit = _read(path)
     if hit is not None:
         return hit
-    check_deadline()
     end = dt.date.fromisoformat(day)
     start = end - dt.timedelta(days=days)
+    try:                                  # FinMind（Sponsor Pro）優先；不能用才向富邦抓（保留作備用）
+        import fm_store
+        fm_path = fm_store.FM_DIR / "range" / day / f"{sid}.json"   # FinMind 衍生資料不放進 data/（不會進公開快取）
+        hit = _read(fm_path)
+        if hit is not None:
+            return hit
+        rec = fm_store.range_top(sid, start.isoformat(), day)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("FinMind 區間榜失敗（%s），改走富邦", ex)
+        rec = None
+    if rec is not None:
+        _write(fm_path, rec)
+        return rec
+    check_deadline()
     rec = parse_page(fetcher.get(f"{BASE_URL}?a={sid}&e={start.year}-{start.month}-{start.day}&f={end.year}-{end.month}-{end.day}"), sid)
     _write(path, rec)
     return rec
