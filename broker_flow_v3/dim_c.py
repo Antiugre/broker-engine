@@ -356,11 +356,10 @@ def curveball(edges, rng):
     return [(i, j) for i, v in rows.items() for j in v]
 
 
-def s_fraudar(blocks, j: int, cand_g: np.ndarray, conn: set) -> tuple[np.ndarray, np.ndarray]:
-    n = len(cand_g)
-    iu = np.triu_indices(n, 1)
-    same = np.zeros(len(iu[0]))
-    opp = np.zeros(len(iu[0]))
+def s_fraudar(blocks, j: int, cand_g: np.ndarray, conn: set, pa: np.ndarray, pb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """配對 (pa, pb)（候選分點的索引）的 S_Fr 兩個通道"""
+    same = np.zeros(len(pa))
+    opp = np.zeros(len(pa))
     for bl in blocks:
         if j not in bl["right"]:
             continue
@@ -369,8 +368,8 @@ def s_fraudar(blocks, j: int, cand_g: np.ndarray, conn: set) -> tuple[np.ndarray
         t1 = np.array([tau.get(2 * g + 1, np.nan) if 2 * g + 1 in conn else np.nan for g in cand_g])
         T = (t0, t1)
         for ra, rb, ch in ROLE_PAIRS:
-            v = np.fmin(T[ra][iu[0]], T[rb][iu[1]])
-            v = np.where(np.isfinite(T[ra][iu[0]]) & np.isfinite(T[rb][iu[1]]), v, 0.0)
+            x, y = T[ra][pa], T[rb][pb]
+            v = np.where(np.isfinite(x) & np.isfinite(y), np.fmin(x, y), 0.0)
             if ch == "same":
                 same = np.maximum(same, v)
             else:
@@ -379,12 +378,10 @@ def s_fraudar(blocks, j: int, cand_g: np.ndarray, conn: set) -> tuple[np.ndarray
 
 
 # ───────────────────────── 窗口：S_CP、S_Fr → p_C（兩個通道）─────────────────────────
-def s_cp(fit, fw: int, mk: dict, j: int, inf: dict):
-    """回傳 (same, opp, m_w)；沒有分量出現 → NaN"""
+def s_cp(fit, fw: int, mk: dict, j: int, inf: dict, pa: np.ndarray, pb: np.ndarray):
+    """配對 (pa, pb) 的 (same, opp, m_w)；沒有分量出現 → NaN"""
     c = P.dim_c
-    n = len(inf["cand"])
-    iu = np.triu_indices(n, 1)
-    nan = np.full(len(iu[0]), np.nan)
+    nan = np.full(len(pa), np.nan)
     span = int(c.fit_weeks)
     w0 = fw - span + 1
     weeks = inf["weeks"]
@@ -402,7 +399,7 @@ def s_cp(fit, fw: int, mk: dict, j: int, inf: dict):
         if V[j, k] < float(c.appear_stock) or Wt[wloc, k].sum() < float(c.appear_weeks) * (1 - m_w):
             continue
         up, un = U[2 * g, k].astype(float), U[2 * g + 1, k].astype(float)
-        a, b = iu
+        a, b = pa, pb
         ss = np.maximum(np.where(ep[a] & ep[b], up[a] * up[b], 0), np.where(en[a] & en[b], un[a] * un[b], 0))
         oo = np.maximum(np.where(en[a] & ep[b], un[a] * up[b], 0), np.where(ep[a] & en[b], up[a] * un[b], 0))
         best_s = np.fmax(best_s, ss)
@@ -411,59 +408,74 @@ def s_cp(fit, fw: int, mk: dict, j: int, inf: dict):
 
 
 def window_c(mk: dict, end: str, fits: dict, sids_detail: set | None = None) -> dict | None:
-    """fits＝{b: fit}（b = −1 觀測、0..19 虛無）；回傳每檔股票配對的 p_C_same、p_C_opp"""
+    """fits＝{b: fit}（b = −1 觀測、0..19 虛無）；回傳指定股票（sids_detail）配對的 p_C_same、p_C_opp
+    虛無池化範圍＝全市場所有 (股票, 窗口)（G-POOL）；SPEC-GAP-v3（記憶體）：每檔股票每次虛無只抽 ≤ null_pairs 個配對計分
+    （v3 候選含當沖型，全市場配對數上千萬；抽樣只影響虛無分布的估計精度，不影響觀測值）"""
     c = P.dim_c
     fw = fit_for(mk, end)
     infos = {j: v for (j, e), v in mk["info"].items() if e == end}
     if not infos:
         return None
+    detail = {j for j in infos if sids_detail is None or mk["sids"][j] in sids_detail}
     out = {"end": end, "fit_week": fw, "universe": mk["universe"], "params_version": P.version, "pairs": {}}
-    obs, pools = {}, {"cp_s": Pool(), "cp_o": Pool(), "fr_s": Pool(), "fr_o": Pool()}
-    strata = {}
+    pools = {"cp_s": Pool(), "cp_o": Pool(), "fr_s": Pool(), "fr_o": Pool()}
+    M = int(c.null_pairs)
+    samp, full = {}, {}
     for j, inf in infos.items():
         dec = inf["dec"].astype(int)
-        iu = np.triu_indices(len(dec), 1)
-        strata[j] = stratum(dec[iu[0]], dec[iu[1]])
-        s, o, mw = s_cp(fits.get(-1), fw, mk, j, inf) if fw is not None else (np.full(len(iu[0]), np.nan),) * 2 + (1.0,)
-        obs[j] = {"cp_s": s, "cp_o": o, "m_w": mw}
-        for b in range(int(c.null_cp)):
-            if fits.get(b) is None:
-                continue
-            ns, no, _ = s_cp(fits[b], fw, mk, j, inf)
-            pools["cp_s"].add(strata[j], ns)
-            pools["cp_o"].add(strata[j], no)
+        n = len(dec)
+        iu = np.triu_indices(n, 1)
+        rng = np.random.default_rng(int(hash_u("C-samp", end, j) * 2 ** 31))
+        sel = np.sort(rng.choice(len(iu[0]), min(M, len(iu[0])), replace=False)) if len(iu[0]) else np.zeros(0, int)
+        samp[j] = (iu[0][sel], iu[1][sel], stratum(dec[iu[0][sel]], dec[iu[1][sel]]))
+        if j in detail:
+            full[j] = (iu[0], iu[1], stratum(dec[iu[0]], dec[iu[1]]))
+    obs = {}
+    for j, inf in infos.items():
+        pa, pb, st = samp[j]
+        if fw is not None:
+            for b in range(int(c.null_cp)):
+                if fits.get(b) is None:
+                    continue
+                ns, no, _ = s_cp(fits[b], fw, mk, j, inf, pa, pb)
+                pools["cp_s"].add(st, ns)
+                pools["cp_o"].add(st, no)
+        if j in detail:
+            fa, fb, _ = full[j]
+            obs[j] = s_cp(fits.get(-1), fw, mk, j, inf, fa, fb) if fw is not None else (np.full(len(fa), np.nan),) * 2 + (1.0,)
     edges = [e for inf in infos.values() for e in inf["fr_edges"]]
     nb = int(c.fraudar_blocks)
 
-    def score(E):
+    def score(E, which):
         blocks = fraudar_blocks(E, nb)
         conn: dict = {}
         for i, jj in E:
             conn.setdefault(jj, set()).add(i)
-        return {j: s_fraudar(blocks, j, inf["cand"], conn.get(j, set())) for j, inf in infos.items()}
-    fo = score(edges)
+        src = full if which == "full" else samp
+        return {j: s_fraudar(blocks, j, infos[j]["cand"], conn.get(j, set()), src[j][0], src[j][1]) for j in src}
+    fo = score(edges, "full")
     rng = np.random.default_rng(int(hash_u("C-fr", end) * 2 ** 31))
     for _ in range(int(c.null_fr)):
-        t = score(curveball(edges, rng))
+        t = score(curveball(edges, rng), "samp")
         for j in infos:
-            pools["fr_s"].add(strata[j], t[j][0])
-            pools["fr_o"].add(strata[j], t[j][1])
-    for j, inf in infos.items():
+            pools["fr_s"].add(samp[j][2], t[j][0])
+            pools["fr_o"].add(samp[j][2], t[j][1])
+    for j in detail:
+        inf = infos[j]
         sid = mk["sids"][j]
         keys = [mk["keys"][g] for g in inf["cand"]]
-        n = len(keys)
-        iu = np.triu_indices(n, 1)
-        u = np.array([hash_u(sid, end, min(keys[a], keys[b]), max(keys[a], keys[b]), "C") for a, b in zip(*iu)]) if n > 1 else np.zeros(0)
-        o = obs[j]
-        if o["m_w"] > float(c.max_missing_week_frac):
-            pcs = pco = np.full(len(iu[0]), np.nan)
+        fa, fb, st = full[j]
+        u = np.array([hash_u(sid, end, min(keys[a], keys[b]), max(keys[a], keys[b]), "C") for a, b in zip(fa, fb)]) if len(fa) else np.zeros(0)
+        s_, o_, mw = obs[j]
+        if mw > float(c.max_missing_week_frac):
+            pcs = pco = np.full(len(fa), np.nan)
         else:
-            pcs, _ = pools["cp_s"].pvalues(strata[j], o["cp_s"], u)
-            pco, _ = pools["cp_o"].pvalues(strata[j], o["cp_o"], u)
-        pfs, _ = pools["fr_s"].pvalues(strata[j], fo[j][0], u)
-        pfo, _ = pools["fr_o"].pvalues(strata[j], fo[j][1], u)
+            pcs, _ = pools["cp_s"].pvalues(st, s_, u)
+            pco, _ = pools["cp_o"].pvalues(st, o_, u)
+        pfs, _ = pools["fr_s"].pvalues(st, fo[j][0], u)
+        pfo, _ = pools["fr_o"].pvalues(st, fo[j][1], u)
         out["pairs"][sid] = {"keys": keys, "p_C_same": np.asarray(cct([pcs, pfs]), np.float32),
-                             "p_C_opp": np.asarray(cct([pco, pfo]), np.float32), "m_w": float(o["m_w"])}
+                             "p_C_opp": np.asarray(cct([pco, pfo]), np.float32), "m_w": float(mw)}
     return out
 
 
