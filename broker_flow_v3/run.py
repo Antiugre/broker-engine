@@ -157,7 +157,7 @@ def _name(sid: str) -> str:
     return ""
 
 
-def run_all(stocks: list[str] | None = None, groups: bool = True) -> list[dict]:
+def run_all(stocks: list[str] | None = None, groups: bool = True, on_doc=None) -> list[dict]:
     from .group import run_group
     ctx: dict = {}
     docs = []
@@ -167,6 +167,8 @@ def run_all(stocks: list[str] | None = None, groups: bool = True) -> list[dict]:
             d = run_stock(sid, ctx)
             if d:
                 docs.append(d)
+                if on_doc:
+                    on_doc(docs)                       # 每算完一檔就先上傳，不必等集團模式
         except Exception as ex:  # noqa: BLE001
             log.exception("v3 %s 失敗：%s", sid, ex)
     if groups:
@@ -188,6 +190,8 @@ def run_all(stocks: list[str] | None = None, groups: bool = True) -> list[dict]:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps(doc, ensure_ascii=False, default=str), encoding="utf-8")
             docs.append(doc)
+            if on_doc:
+                on_doc(docs)
     return docs
 
 
