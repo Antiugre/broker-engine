@@ -49,6 +49,15 @@ jobs:
           if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --pattern "corrections.json" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
             echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
           else echo "FinMind 資料下載失敗"; exit 1; fi
+      - name: 人工更正檔（必要；私人倉庫 corrections.json，下載失敗或驗收不符就停止，不照算）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/corr"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern corrections.json --dir "$RUNNER_TEMP/corr" --clobber
+          test -s "$RUNNER_TEMP/corr/corrections.json"
+          echo "BB_CORRECTIONS=$RUNNER_TEMP/corr/corrections.json" >> "$GITHUB_ENV"
+          echo "BB_REQUIRE_CORRECTIONS=1" >> "$GITHUB_ENV"
+          BB_CORRECTIONS="$RUNNER_TEMP/corr/corrections.json" BB_REQUIRE_CORRECTIONS=1 python tools/check_corrections.py
       - name: 取得資料
         run: |
           if [ -n "${{ inputs.run_id }}" ] && gh run download "${{ inputs.run_id }}" -n state-download -D st; then tar -xf st/state.tar

@@ -29,6 +29,15 @@ jobs:
           GH_TOKEN="${{ github.token }}" gh release download cache -R Antiugre/broker-engine --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
           gh release view dimc3 -R Antiugre/broker-data >/dev/null 2>&1 || gh release create dimc3 -R Antiugre/broker-data --title dimc3 --notes "主力集團 v3 維度 C 中間結果（私人）"
           gh release download dimc3 -R Antiugre/broker-data --pattern rank.json --dir dimc --clobber || true
+      - name: 人工更正檔（必要；私人倉庫 corrections.json，下載失敗或驗收不符就停止，不照算）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/corr"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern corrections.json --dir "$RUNNER_TEMP/corr" --clobber
+          test -s "$RUNNER_TEMP/corr/corrections.json"
+          echo "BB_CORRECTIONS=$RUNNER_TEMP/corr/corrections.json" >> "$GITHUB_ENV"
+          echo "BB_REQUIRE_CORRECTIONS=1" >> "$GITHUB_ENV"
+          BB_CORRECTIONS="$RUNNER_TEMP/corr/corrections.json" BB_REQUIRE_CORRECTIONS=1 python tools/check_corrections.py
       - name: 全市場彙總＋選秩
         id: p
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
@@ -51,6 +60,15 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
+      - name: 人工更正檔（必要；私人倉庫 corrections.json，下載失敗或驗收不符就停止，不照算）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/corr"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern corrections.json --dir "$RUNNER_TEMP/corr" --clobber
+          test -s "$RUNNER_TEMP/corr/corrections.json"
+          echo "BB_CORRECTIONS=$RUNNER_TEMP/corr/corrections.json" >> "$GITHUB_ENV"
+          echo "BB_REQUIRE_CORRECTIONS=1" >> "$GITHUB_ENV"
+          BB_CORRECTIONS="$RUNNER_TEMP/corr/corrections.json" BB_REQUIRE_CORRECTIONS=1 python tools/check_corrections.py
       - name: 擬合
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
@@ -68,6 +86,15 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
+      - name: 人工更正檔（必要；私人倉庫 corrections.json，下載失敗或驗收不符就停止，不照算）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/corr"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern corrections.json --dir "$RUNNER_TEMP/corr" --clobber
+          test -s "$RUNNER_TEMP/corr/corrections.json"
+          echo "BB_CORRECTIONS=$RUNNER_TEMP/corr/corrections.json" >> "$GITHUB_ENV"
+          echo "BB_REQUIRE_CORRECTIONS=1" >> "$GITHUB_ENV"
+          BB_CORRECTIONS="$RUNNER_TEMP/corr/corrections.json" BB_REQUIRE_CORRECTIONS=1 python tools/check_corrections.py
       - name: 各窗口 p_C
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |

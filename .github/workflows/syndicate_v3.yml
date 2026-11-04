@@ -29,6 +29,15 @@ jobs:
           gh release download TDR-by-stock -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/TDR" --clobber || echo "價位明細下載失敗：維度 B 不計算"
           gh release download aux -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/aux_year" --clobber || echo "輔助資料年檔還沒有：改用逐檔查詢"
           echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"/*
+      - name: 人工更正檔（必要；私人倉庫 corrections.json，下載失敗或驗收不符就停止，不照算）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/corr"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern corrections.json --dir "$RUNNER_TEMP/corr" --clobber
+          test -s "$RUNNER_TEMP/corr/corrections.json"
+          echo "BB_CORRECTIONS=$RUNNER_TEMP/corr/corrections.json" >> "$GITHUB_ENV"
+          echo "BB_REQUIRE_CORRECTIONS=1" >> "$GITHUB_ENV"
+          BB_CORRECTIONS="$RUNNER_TEMP/corr/corrections.json" BB_REQUIRE_CORRECTIONS=1 python tools/check_corrections.py
       - name: 還原資料（價格快取＋v3 中間結果）
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
