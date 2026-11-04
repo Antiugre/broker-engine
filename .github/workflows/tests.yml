@@ -3,7 +3,7 @@ name: tests
 on:
   workflow_dispatch:
   push:
-    paths: ["fm_store.py", "quant.py", "broker_flow/**", "tests/**"]
+    paths: ["fm_store.py", "quant.py", "broker_flow/**", "broker_timing/**", "tests/**"]
 permissions:
   contents: read
 jobs:
@@ -16,3 +16,4 @@ jobs:
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest -q tests/test_fm_store.py tests/test_broker_flow.py tests/test_dim_b.py
+      - run: python -m pytest -q tests/test_timing.py          # 擇時偵測（含 6 個情境的虛無校準，約 2 分鐘）

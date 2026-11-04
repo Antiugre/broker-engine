@@ -1,0 +1,58 @@
+# 單一分點擇時偵測（docs/timing_spec_v1.1.2.md，方法以 broker_timing/CHANGELOG.md 最新一輪為準）
+#   → syndicate/{代號}@timing、syndicate/_index@timing（管理員限定；§9 驗證通過前不排程、不公開）
+#   FinMind 資料只放 $RUNNER_TEMP（不進 artifact、不進公開快取）
+name: timing
+on:
+  workflow_dispatch:
+    inputs:
+      stocks: { description: "只算這些股票（空白＝全部有長期價格的股票）", required: false }
+      processes: { description: "平行行程數", required: false, default: "4" }
+      reps: { description: "EI bootstrap 次數（空白＝params.yaml）", required: false }
+      no_upload: { description: "只測試、不上傳", type: boolean, default: false }
+concurrency: { group: timing, cancel-in-progress: false }
+jobs:
+  timing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      TZ: Asia/Taipei
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt pytest
+      - name: 測試（合成資料；校準不過就停止）
+        run: python -m pytest -q tests/test_timing.py
+      - name: FinMind 分點資料（私人倉庫；放在 data/ 以外）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg" "$RUNNER_TEMP/finmind/aux_year"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
+          gh release download aux -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/aux_year" --clobber || echo "輔助資料年檔還沒有：改用逐檔查詢"
+          echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"/*
+      - name: 人工更正檔（必要；下載失敗或驗收不符就停止，不照算）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/corr"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern corrections.json --dir "$RUNNER_TEMP/corr" --clobber
+          test -s "$RUNNER_TEMP/corr/corrections.json"
+          echo "BB_CORRECTIONS=$RUNNER_TEMP/corr/corrections.json" >> "$GITHUB_ENV"
+          echo "BB_REQUIRE_CORRECTIONS=1" >> "$GITHUB_ENV"
+          BB_CORRECTIONS="$RUNNER_TEMP/corr/corrections.json" BB_REQUIRE_CORRECTIONS=1 python tools/check_corrections.py
+      - name: 還原價格快取
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
+      - name: Firebase 金鑰
+        if: ${{ !inputs.no_upload }}
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: 擇時偵測
+        run: |
+          ARGS="${{ inputs.stocks }} --processes ${{ inputs.processes || '4' }}"
+          [ -n "${{ inputs.reps }}" ] && ARGS="$ARGS --reps ${{ inputs.reps }}"
+          [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
+          python tools/timing_v1.py $ARGS
