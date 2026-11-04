@@ -1,0 +1,51 @@
+# 人工更正同步：私人倉庫 corrections.json → 驗收 → Firestore syndicate/_corrections（網站即時查詢據此蓋過富邦資料）
+#   更正檔改了之後手動執行一次；每晚的計算上傳時也會一併同步
+name: corrections-sync
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: corrections-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Taipei
+  BB_DATA_DIR: ${{ github.workspace }}/data
+  BB_ROLE: cloud
+  PYTHONUTF8: "1"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: FinMind 分點資料（私人倉庫；驗收用）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
+          echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"
+      - name: 人工更正檔（必要；下載失敗或驗收不符就停止）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/corr"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern corrections.json --dir "$RUNNER_TEMP/corr" --clobber
+          test -s "$RUNNER_TEMP/corr/corrections.json"
+          echo "BB_CORRECTIONS=$RUNNER_TEMP/corr/corrections.json" >> "$GITHUB_ENV"
+          echo "BB_REQUIRE_CORRECTIONS=1" >> "$GITHUB_ENV"
+          BB_CORRECTIONS="$RUNNER_TEMP/corr/corrections.json" BB_REQUIRE_CORRECTIONS=1 python tools/check_corrections.py
+      - name: Firebase 金鑰
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: 同步到 Firestore
+        run: python tools/push_corrections.py
