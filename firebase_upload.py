@@ -380,6 +380,9 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
     }
     if latest == date:
         meta["stocks"] = [{"id": s, "name": records[s].get("stock_name")} for s in records]
+        if prev_meta and prev_meta.get("date") == date:     # 同一天只重算部分股票（flow-now 指定股票）時，不把股票清單縮成那幾檔
+            have = {x["id"] for x in meta["stocks"]}
+            meta["stocks"] = [x for x in (prev_meta.get("stocks") or []) if x.get("id") not in have] + meta["stocks"]
     else:  # 補傳舊日期時，不覆蓋最新日期的股票清單
         meta["stocks"] = (prev_meta or {}).get("stocks", [])
     # 內容版本：任何 days/hist 內容改變，meta 也會跟著改 → 前端以此判斷快取是否過期
