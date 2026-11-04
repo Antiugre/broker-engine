@@ -93,6 +93,10 @@ def _corrections():
         return pd.DataFrame()
 
 
+def _norm_name(x) -> str:
+    return "".join(str(x).replace("證券", "").split()).replace("-", "").replace("－", "").replace("—", "")
+
+
 def _apply_corrections(sid: str, df):
     import numpy as np
     import pandas as pd
@@ -103,8 +107,11 @@ def _apply_corrections(sid: str, df):
     for r in c.itertuples():
         bid = str(getattr(r, "securities_trader_id", "") or "")
         if bid in ("", "nan", "None"):
-            hit = df.loc[df["securities_trader"].astype(str) == str(r.securities_trader), "securities_trader_id"]
+            want = _norm_name(r.securities_trader)       # 名稱寫法不同（統一-仁愛／統一仁愛）也對得到
+            hit = df.loc[df["securities_trader"].astype(str).map(_norm_name) == want, "securities_trader_id"]
             bid = str(hit.iloc[-1]) if len(hit) else ""
+            if not bid:                                  # 這檔股票從沒出現過這個分點 → 用富邦分點清單找代碼
+                bid = next((k for k, x in _fubon_ids().items() if _norm_name(x.get("broker") or x.get("name") or "") == want), "")
         if not bid:
             log.warning("人工更正 %s %s %s：這檔股票找不到這個分點，略過", sid, r.date, r.securities_trader)
             continue
