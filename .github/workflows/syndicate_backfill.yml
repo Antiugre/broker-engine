@@ -1,0 +1,102 @@
+# 主力集團：全市場維度 C 歷史窗口分給多台機器同時算 → 合併進私人倉庫的中間結果 → 跑一次完整的主力集團並上傳
+#   方法不變（每個窗口的計算與每晚相同），只是分工加速；手動執行
+name: syndicate-backfill
+on:
+  workflow_dispatch:
+    inputs:
+      shards: { description: "分幾台（最多 16）", default: "16" }
+      no_upload: { description: "只測試、不上傳 Firestore", type: boolean, default: false }
+permissions:
+  contents: read
+concurrency: { group: syndicate-backfill, cancel-in-progress: false }
+env:
+  TZ: Asia/Taipei
+  BB_DATA_DIR: ${{ github.workspace }}/data
+  BB_ROLE: cloud
+  PYTHONUTF8: "1"
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs: { idx: "${{ steps.p.outputs.idx }}" }
+    steps:
+      - id: p
+        run: echo "idx=$(python3 -c "import json;print(json.dumps(list(range(min(16,int('${{ inputs.shards }}'))))))")" >> "$GITHUB_OUTPUT"
+  shard:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix: { i: "${{ fromJSON(needs.plan.outputs.idx) }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: FinMind 分點資料（私人倉庫；放在 data/ 以外）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
+          echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"
+      - name: 還原價格快取（公開，只有富邦／證交所資料）
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
+      - name: 算分到的窗口
+        run: python tools/syndicate_shard.py --shard ${{ matrix.i }} --of ${{ strategy.job-total }} --max-hours 5.3
+      - name: 存這台的窗口結果（私人倉庫）
+        if: ${{ always() }}
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          cd data/broker_flow/_cache 2>/dev/null || exit 0
+          ls dim_c_20*.pkl >/dev/null 2>&1 || exit 0
+          tar -czf "$RUNNER_TEMP/dimc-shard-${{ matrix.i }}.tar.gz" dim_c_20*.pkl dim_c_rank_roles.json
+          gh release view engine-cache -R Antiugre/broker-data >/dev/null 2>&1 || gh release create engine-cache -R Antiugre/broker-data --title engine-cache --notes "broker-engine 中間結果（私人）" || true
+          gh release upload engine-cache -R Antiugre/broker-data "$RUNNER_TEMP/dimc-shard-${{ matrix.i }}.tar.gz" --clobber
+  merge:
+    needs: shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: FinMind 分點資料（私人倉庫；放在 data/ 以外）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
+          echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"
+      - name: 還原價格快取
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
+      - name: 合併各台的窗口結果＋既有中間結果
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p data/broker_flow/_cache sh
+          gh release download engine-cache -R Antiugre/broker-data --pattern broker_flow_cache.tar.gz --dir . --clobber && tar -xzf broker_flow_cache.tar.gz -C data/broker_flow || echo "尚無既有中間結果"
+          gh release download engine-cache -R Antiugre/broker-data --pattern "dimc-shard-*.tar.gz" --dir sh --clobber || true
+          for f in sh/*.tar.gz; do [ -f "$f" ] && tar -xzf "$f" -C data/broker_flow/_cache; done
+          ls data/broker_flow/_cache | grep -c '^dim_c_20' || true
+      - name: Firebase 金鑰
+        if: ${{ !inputs.no_upload }}
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: 主力集團（用合併後的窗口結果，只補算還缺的）
+        run: |
+          ARGS="--max-hours 5.0"
+          [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
+          python tools/syndicate_now.py $ARGS
+      - name: 存回私人倉庫（與既有的合併，不覆蓋別人剛存的）
+        if: ${{ always() }}
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          [ -d data/broker_flow/_cache ] || exit 0
+          mkdir -p merged && (gh release download engine-cache -R Antiugre/broker-data --pattern broker_flow_cache.tar.gz -O old.tgz --clobber && tar -xzf old.tgz -C merged || true)
+          mkdir -p merged/_cache && cp -r data/broker_flow/_cache/. merged/_cache/
+          tar -czf broker_flow_cache.tar.gz -C merged _cache
+          gh release upload engine-cache -R Antiugre/broker-data broker_flow_cache.tar.gz --clobber

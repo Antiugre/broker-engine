@@ -227,6 +227,8 @@ jobs:
         run: |
           gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
           GH_TOKEN="${{ secrets.DATA_REPO_TOKEN }}" gh release download engine-cache -R Antiugre/broker-data --pattern broker_flow_cache.tar.gz --dir . --clobber && mkdir -p data/broker_flow && tar -xzf broker_flow_cache.tar.gz -C data/broker_flow || echo "尚無主力集團快取（第一次會比較久）"
+          mkdir -p sh data/broker_flow/_cache && GH_TOKEN="${{ secrets.DATA_REPO_TOKEN }}" gh release download engine-cache -R Antiugre/broker-data --pattern "dimc-shard-*.tar.gz" --dir sh --clobber || true
+          for f in sh/*.tar.gz; do [ -f "$f" ] && tar -xzf "$f" -C data/broker_flow/_cache; done   # 分工補算的窗口結果
       - name: Firebase 金鑰
         if: ${{ !inputs.no_upload }}
         env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
@@ -243,8 +245,10 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           [ -d data/broker_flow/_cache ] || exit 0
-          tar -czf broker_flow_cache.tar.gz -C data/broker_flow _cache
           gh release view engine-cache -R Antiugre/broker-data >/dev/null 2>&1 || gh release create engine-cache -R Antiugre/broker-data --title engine-cache --notes "broker-engine 中間結果（私人）"
+          mkdir -p merged && (gh release download engine-cache -R Antiugre/broker-data --pattern broker_flow_cache.tar.gz -O old.tgz --clobber && tar -xzf old.tgz -C merged || true)
+          mkdir -p merged/_cache && cp -r data/broker_flow/_cache/. merged/_cache/     # 與既有的合併（分工補算的結果不會被蓋掉）
+          tar -czf broker_flow_cache.tar.gz -C merged _cache
           gh release upload engine-cache -R Antiugre/broker-data broker_flow_cache.tar.gz --clobber
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
