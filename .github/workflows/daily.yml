@@ -1,7 +1,8 @@
 # 每日雲端運算（主跑）：三段接力，每段都在 GitHub 單次 6 小時限制內
 #   ① download：還原快取 → 等富邦／兆豐資料更新 → 下載（兩站同時）→ 全分點反查 → Hit Ratio → 先行上傳
 #   ② edge：Expectancy → 先行上傳
-#   ③ flow：Order Flow → 本土主力 → 中小型吃貨 → 整批上傳 → 更新長期資料快取（Release「cache」）
+#   ③ flow：Order Flow → 本土主力 → 中小型吃貨 → 整批上傳（11/4 起和 ② 同時跑：只需要 ① 的資料，不必等 Expectancy）
+#   ③' cache：② ③ 都結束後合併兩段的 data/（較新的檔案優先）→ 更新長期資料快取（Release「cache」）
 #   ④ syndicate：主力集團偵測（測試版，全市場維度 C＋集團＋假集團對照）→ 只上傳 syndicate/*；中間結果存私人倉庫 broker-data 的 Release「engine-cache」
 #   分點資料：FinMind（私人倉庫 broker-data，下載到 $RUNNER_TEMP，不進 data/）優先；拿不到時各引擎自動改走富邦（備用路徑保留）
 #   段與段之間用 artifact 傳整個 data/（約幾百 MB，保留 2 天）
@@ -155,8 +156,8 @@ jobs:
           retention-days: 14
 
   flow:
-    needs: edge
-    if: ${{ always() && (needs.edge.result == 'success' || inputs.start == 'flow') }}
+    needs: download
+    if: ${{ always() && (needs.download.result == 'success' || inputs.start == 'flow' || inputs.start == 'edge') }}
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
@@ -172,9 +173,9 @@ jobs:
             echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
           else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 接手上一段的資料
-        if: ${{ needs.edge.result == 'success' }}
+        if: ${{ needs.download.result == 'success' }}
         uses: actions/download-artifact@v4
-        with: { name: state-edge }
+        with: { name: state-download }
       - name: 還原資料
         run: |
           if [ -f state.tar ]; then tar -xf state.tar; else
@@ -193,12 +194,12 @@ jobs:
           [ -n "${{ inputs.stocks }}" ] && ARGS="$ARGS --stocks ${{ inputs.stocks }}"
           [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
           python pipeline.py $ARGS
-      - name: 更新長期資料快取（下次接著用）
-        if: ${{ always() && !inputs.no_upload }}
-        run: |
-          python tools/cache_bundle.py pack --out data_cache.tar.gz
-          gh release view cache >/dev/null 2>&1 || gh release create cache --title "data cache" --notes "長期資料快取（自動更新）" --prerelease
-          gh release upload cache data_cache.tar.gz --clobber
+      - name: 交給快取合併
+        if: ${{ always() }}
+        run: tar -cf state.tar data
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with: { name: state-flow, path: state.tar, retention-days: 2, compression-level: 6, overwrite: true }
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
@@ -206,8 +207,33 @@ jobs:
           path: logs/
           retention-days: 14
 
+  cache:
+    needs: [edge, flow]
+    if: ${{ always() && !inputs.no_upload && (needs.edge.result == 'success' || needs.flow.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: state-edge, path: se }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { name: state-flow, path: sf }
+      - name: 合併 ② ③ 的資料（同一個檔案取較新的版本）→ 更新長期資料快取
+        run: |
+          [ -f se/state.tar ] && tar -xf se/state.tar
+          [ -f sf/state.tar ] && tar --keep-newer-files -xf sf/state.tar
+          test -d data
+          python tools/cache_bundle.py pack --out data_cache.tar.gz
+          gh release view cache >/dev/null 2>&1 || gh release create cache --title "data cache" --notes "長期資料快取（自動更新）" --prerelease
+          gh release upload cache data_cache.tar.gz --clobber
+
   syndicate:
-    needs: flow
+    needs: [flow, cache]
     if: ${{ always() && (needs.flow.result == 'success' || inputs.start == 'syndicate') && (!inputs.stocks || inputs.start == 'syndicate') }}   # 指定股票的測試執行不跑主力集團（它不看股票清單、會跑好幾小時）
     runs-on: ubuntu-latest
     timeout-minutes: 355
