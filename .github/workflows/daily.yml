@@ -235,6 +235,13 @@ jobs:
         run: |
           printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
           echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: 分點價位明細（維度 B；私人倉庫，放在 data/ 以外）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          [ -n "$FM_DIR" ] || exit 0
+          mkdir -p "$FM_DIR/TDR"
+          gh release download TDR-by-stock -R Antiugre/broker-data --pattern "*.parquet" --dir "$FM_DIR/TDR" --clobber || echo "價位明細下載失敗：這次維度 B 不計算"
+          du -sh "$FM_DIR/TDR" || true
       - name: ④ 主力集團偵測（測試版）
         run: |
           ARGS="--max-hours 5.2"

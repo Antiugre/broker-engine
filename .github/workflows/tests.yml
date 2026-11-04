@@ -15,4 +15,4 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt pytest
-      - run: python -m pytest -q tests/test_fm_store.py tests/test_broker_flow.py
+      - run: python -m pytest -q tests/test_fm_store.py tests/test_broker_flow.py tests/test_dim_b.py
