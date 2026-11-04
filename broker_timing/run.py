@@ -169,12 +169,16 @@ def analyze_stock(sid: str, *, pn=None, pr: prep.Prep | None = None, events=None
     nets = pn.B - pn.S
     rows, keep = [], []
     st = {}
+    diag = []                                                  # 分點查詢（網站「3 分點查詢」）：活躍日 ≥ DIAG_MIN_ACTIVE 的分點各門檻
     for i in range(len(pn.branches)):
         n = nets[i]
         act = (n != 0) & ~pn.suspended
-        if act[:T].sum() < int(TP.min_active_days):           # 最便宜的門檻先擋
+        na = int(act[:T].sum())
+        if na < DIAG_MIN_ACTIVE:
             continue
         th = thresholds(n, act, sa, pn.close, pn.volume)
+        diag.append([str(pn.branches[i]), str(pn.names[i]), na, int(th["G_eff"]), round(float(th["volume_share"]), 6),
+                     int(th["cycles"]), bool(th["eligible"])])
         if not th["eligible"]:
             continue
         bt = branch_test(n, act, sa)
@@ -197,7 +201,7 @@ def analyze_stock(sid: str, *, pn=None, pr: prep.Prep | None = None, events=None
                       "price_source": pn.meta.get("price_source"), "corp_actions": int(len(events)) if events is not None else 0,
                       "industry_factor": bool(sa["industry_factor"]), "n_peers": int(sa["n_peers"])}}
     res = {"sid": sid, "split": split_label, "rows": rows, "n_branches": len(pn.branches), "n_eligible": len(rows),
-           "seconds": round(time.time() - t0, 1)}
+           "seconds": round(time.time() - t0, 1), "diag": diag}
     if state_dir is None:
         res["_state"] = state
     else:
@@ -345,8 +349,25 @@ def finalize_stock(res: dict, stock_name: str = "", asof: str | None = None, wri
            "sections": {"test": ["kind", "flags", "pE", "qE", "pR", "qR", "delta", "delta_ci90", "kappa_plus", "p_Eplus"],
                         "descriptive": ["rho", "rho_ci90", "h_star", "cycles", "G_eff", "timing_pnl", "exec", "pnl", "position_score",
                                         "holdings", "trend", "last_action"]},
-           "spec_gaps": [{"item": x, "note": y} for x, y in SPEC_GAPS]}
+           "spec_gaps": [{"item": x, "note": y} for x, y in SPEC_GAPS],
+           "diag": build_diag(res)}
     return cap_size(doc)
+
+
+DIAG_MIN_ACTIVE = 10
+
+
+def build_diag(res: dict) -> dict:
+    """網站「3 分點查詢」：活躍日 ≥ 10 的分點的 §6.1 各門檻；通過門檻者附 p、q（不論是否顯著）。只供查詢，不是訊號"""
+    pq = {str(r["branch"]): r for r in res["rows"]}
+    rows = []
+    for b, name, na, g, v, c, ok in res.get("diag") or []:
+        r = pq.get(b)
+        rows.append([b, name, na, g, v, c, ok] + ([_f3(r["pE"]), _f3(r.get("qE")), _f3(r["pR"]), _f3(r.get("qR"))] if r else [None] * 4))
+    rows.sort(key=lambda x: (not x[6], -x[2]))
+    return {"cols": ["branch", "name", "active_days", "G_eff", "volume_share", "cycles", "eligible", "pE", "qE", "pR", "qR"],
+            "min": {"active_days": int(TP.min_active_days), "G_eff": int(TP.min_geff), "volume_share": float(TP.min_volume_share),
+                    "cycles": int(TP.min_cycles)}, "rows": rows}
 
 
 def _web_ids(bid: str, name: str) -> dict:
