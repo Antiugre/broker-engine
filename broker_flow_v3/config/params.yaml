@@ -93,6 +93,14 @@ dim_c:
   background_offset: true
   null_same_procedure: true
   scp_require_extreme_days: 1
+  # v3.1 極端日（取代 |z| ≥ 2）：n ≥ max(Q0.9, 0.005·V, 10,000 股)；Q0.9＝前 120 日（不含當日）非零 |n| 的第 90 百分位數，非零日 < 20 不算
+  ext_quantile: 0.9
+  ext_lookback: 120
+  ext_min_nonzero: 20
+  ext_vol_frac: 0.005
+  ext_min_shares: 10000
+  max_tensor_nnz: 5000000          # v3.1：擬合前先數非零格數，超過就停止並回報，不自行調整門檻
+  chunk_rows: 500000               # v3.1：乘法更新分塊列數
   max_missing_week_frac: 0.5
   fit_weeks: 104
   refit_weeks: 13
