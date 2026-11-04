@@ -1,0 +1,18 @@
+# 測試（手動執行，或改到這些檔案時自動跑）；只用合成資料，不碰 FinMind／富邦
+name: tests
+on:
+  workflow_dispatch:
+  push:
+    paths: ["fm_store.py", "quant.py", "broker_flow/**", "tests/**"]
+permissions:
+  contents: read
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q tests/test_fm_store.py tests/test_broker_flow.py

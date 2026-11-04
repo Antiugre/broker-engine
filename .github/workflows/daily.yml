@@ -2,7 +2,8 @@
 #   ① download：還原快取 → 等富邦／兆豐資料更新 → 下載（兩站同時）→ 全分點反查 → Hit Ratio → 先行上傳
 #   ② edge：Expectancy → 先行上傳
 #   ③ flow：Order Flow → 本土主力 → 中小型吃貨 → 整批上傳 → 更新長期資料快取（Release「cache」）
-#   ④ syndicate：主力集團偵測（測試版，全市場維度 C＋集團＋假集團對照）→ 只上傳 syndicate/*；中間結果存 Release「cache」的 broker_flow_cache.tar.gz
+#   ④ syndicate：主力集團偵測（測試版，全市場維度 C＋集團＋假集團對照）→ 只上傳 syndicate/*；中間結果存私人倉庫 broker-data 的 Release「engine-cache」
+#   分點資料：FinMind（私人倉庫 broker-data，下載到 $RUNNER_TEMP，不進 data/）優先；拿不到時各引擎自動改走富邦（備用路徑保留）
 #   段與段之間用 artifact 傳整個 data/（約幾百 MB，保留 2 天）
 #   本機（MandM）改為備援：關機也沒關係
 name: daily-pipeline
@@ -62,6 +63,13 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
+      - name: FinMind 分點資料（私人倉庫 broker-data；放在 data/ 以外，不會進 artifact 與公開快取）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+            echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
+          else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 還原長期資料快取
         run: |
           gh release download cache --pattern data_cache.tar.gz --dir . --clobber || echo "尚無快取"
@@ -104,6 +112,13 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
+      - name: FinMind 分點資料（私人倉庫 broker-data；放在 data/ 以外，不會進 artifact 與公開快取）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+            echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
+          else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 接手上一段的資料
         if: ${{ needs.download.result == 'success' }}
         uses: actions/download-artifact@v4
@@ -149,6 +164,13 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
+      - name: FinMind 分點資料（私人倉庫 broker-data；放在 data/ 以外，不會進 artifact 與公開快取）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+            echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
+          else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 接手上一段的資料
         if: ${{ needs.edge.result == 'success' }}
         uses: actions/download-artifact@v4
@@ -194,10 +216,17 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
+      - name: FinMind 分點資料（私人倉庫 broker-data；放在 data/ 以外，不會進 artifact 與公開快取）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+            echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
+          else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 還原資料（長期資料快取＋主力集團中間結果）
         run: |
           gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
-          gh release download cache --pattern broker_flow_cache.tar.gz --dir . --clobber && mkdir -p data/broker_flow && tar -xzf broker_flow_cache.tar.gz -C data/broker_flow || echo "尚無主力集團快取（第一次會比較久）"
+          GH_TOKEN="${{ secrets.DATA_REPO_TOKEN }}" gh release download engine-cache -R Antiugre/broker-data --pattern broker_flow_cache.tar.gz --dir . --clobber && mkdir -p data/broker_flow && tar -xzf broker_flow_cache.tar.gz -C data/broker_flow || echo "尚無主力集團快取（第一次會比較久）"
       - name: Firebase 金鑰
         if: ${{ !inputs.no_upload }}
         env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
@@ -209,12 +238,14 @@ jobs:
           ARGS="--max-hours 5.2"
           [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
           python tools/syndicate_now.py $ARGS
-      - name: 存主力集團中間結果（下次接著算）
+      - name: 存主力集團中間結果（私人倉庫；含 FinMind 衍生資料，不放公開 Release）
         if: ${{ always() && !inputs.no_upload }}
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           [ -d data/broker_flow/_cache ] || exit 0
           tar -czf broker_flow_cache.tar.gz -C data/broker_flow _cache
-          gh release upload cache broker_flow_cache.tar.gz --clobber
+          gh release view engine-cache -R Antiugre/broker-data >/dev/null 2>&1 || gh release create engine-cache -R Antiugre/broker-data --title engine-cache --notes "broker-engine 中間結果（私人）"
+          gh release upload engine-cache -R Antiugre/broker-data broker_flow_cache.tar.gz --clobber
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
