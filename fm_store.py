@@ -72,7 +72,55 @@ def stock_table(sid: str):
             parts.append(t.to_pandas())
     if not parts:
         return pd.DataFrame(columns=cols)
-    return pd.concat(parts, ignore_index=True)
+    return _apply_corrections(sid, pd.concat(parts, ignore_index=True))
+
+
+CORR_FILE = SEC_DIR / "corrections.json"      # 使用者指定的人工更正（私人倉庫 broker-data，和月檔放同一個 Release；不放公開倉庫）
+
+
+@lru_cache(maxsize=1)
+def _corrections():
+    """JSON 陣列，每筆欄位：stock_id, date, securities_trader（分點名稱，例：統一-仁愛）, securities_trader_id（可空）, buy_volume, sell_volume（股；省略＝不改）,
+    buy_price, sell_price（省略＝保留原值）, note。只改指定的那一格，不做任何推估"""
+    import json
+    import pandas as pd
+    if not CORR_FILE.exists():
+        return pd.DataFrame()
+    try:
+        return pd.DataFrame(json.loads(CORR_FILE.read_text(encoding="utf-8")))
+    except Exception:  # noqa: BLE001
+        log.exception("人工更正檔讀取失敗（略過）")
+        return pd.DataFrame()
+
+
+def _apply_corrections(sid: str, df):
+    import numpy as np
+    import pandas as pd
+    c = _corrections()
+    if not len(c):
+        return df
+    c = c[c["stock_id"].astype(str) == sid]
+    for r in c.itertuples():
+        bid = str(getattr(r, "securities_trader_id", "") or "")
+        if bid in ("", "nan", "None"):
+            hit = df.loc[df["securities_trader"].astype(str) == str(r.securities_trader), "securities_trader_id"]
+            bid = str(hit.iloc[-1]) if len(hit) else ""
+        if not bid:
+            log.warning("人工更正 %s %s %s：這檔股票找不到這個分點，略過", sid, r.date, r.securities_trader)
+            continue
+        m = (df["securities_trader_id"].astype(str) == bid) & (df["date"].astype(str) == str(r.date))
+        if not m.any():
+            df = pd.concat([df, pd.DataFrame([{"securities_trader_id": bid, "securities_trader": str(r.securities_trader), "date": str(r.date),
+                                               "buy_volume": 0.0, "sell_volume": 0.0, "buy_price": np.nan, "sell_price": np.nan}])],
+                           ignore_index=True)
+            m = (df["securities_trader_id"].astype(str) == bid) & (df["date"].astype(str) == str(r.date))
+        for col in ("buy_volume", "sell_volume", "buy_price", "sell_price"):
+            v = getattr(r, col, np.nan)
+            if v is not None and pd.notna(v):
+                df.loc[m, col] = float(v)
+        log.info("人工更正 %s %s %s（%s）：買 %s 股、賣 %s 股", sid, r.date, r.securities_trader, bid,
+                 df.loc[m, "buy_volume"].iloc[0], df.loc[m, "sell_volume"].iloc[0])
+    return df.sort_values(["securities_trader_id", "date"], kind="stable").reset_index(drop=True)
 
 
 @lru_cache(maxsize=48)
