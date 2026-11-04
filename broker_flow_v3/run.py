@@ -134,6 +134,7 @@ def run_stock(sid: str, ctx: dict) -> dict:
         store.write(pd.concat(allpairs, ignore_index=True), sid, "pairs")
     doc = {"stock_id": sid, "kind": "stock", "version": 3, "stock_name": _name(sid), "asof": str(pn.dates[-1]), "params_version": P.version,
            "source": "finmind", "price_source": pn.meta.get("price_source"),
+           "dim_c_status": "ok" if any(w.get("has_c") for w in windows) else "pending_v3.1",
            "data": {"start": str(pn.dates[0]), "end": str(pn.dates[-1]), "days": len(pn.dates), "branches": len(pn.branches),
                     "analysis_start": str(pn.dates[min(len(pn.dates) - 1, int(P.accounting.warmup_days))]), "t_cut": str(P.governance.t_cut),
                     "suspended_days": int(pn.suspended.sum()), "corp_actions": int(L["n_events"])},

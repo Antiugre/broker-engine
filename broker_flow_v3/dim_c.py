@@ -1,6 +1,11 @@
 """
 §7 維度 C（v3）：全市場跨股結構，分工計算（每一次擬合都是獨立的雲端工作）
-  張量 X：(2 × 分點數) × 股票 × 週；i⁺ 格＝該週 z ≥ 2 的天數、i⁻ 格＝z ≤ −2 的天數（z＝§4.1 淨量 z）；排除隔日沖型
+  張量 X：(2 × 分點數) × 股票 × 週；i⁺ 格＝該週正向極端日數、i⁻ 格＝負向極端日數；排除隔日沖型
+  v3.1 極端日（取代 |z| ≥ 2；§4.1 改尺度後原門檻未重新校準，屬規格錯誤，修正理由不來自驗證結果）：
+    正向：n > 0 且 n ≥ max(Q₀.₉, 0.005·V_j,t, 10,000 股)；負向對稱（|n|）
+    Q₀.₉＝分點 i 在股票 j 前 120 個交易日（不含當日）|n| > 0 的日子的 |n| 第 90 百分位數；非零日 < 20 → 不算極端
+  v3.1 擬合前先數張量非零格數：超過 max_tensor_nnz（500 萬）就停止並回報，不自行調整門檻
+  v3.1 背景項 E 只在非零格上計算；乘法更新分塊計算，不一次建出「非零格數 × 秩」的矩陣
   §7.2 背景分量：X ~ Poisson(E + Σ_r λ_r u_r v_r w_r)，E_a,j,w = X_a,j,· X_·,j,w / X_·,j,·（不參與學習；虛無重擬時由平移後資料重算）
   §7.3 虛無與觀測同一程序（初始值數、穩定性篩選相同）。依 §7.3「計算時間不夠時同時降低」：inits、stable_min 由 params 指定，兩者一起用
   §7.4 S_CP 只計在 (j, w) 兩個角色都有極端日（≥ 1 天）的組合；(++)(−−) → 同向通道，(+−)(−+) → 反向通道；S_Fr 同樣拆兩通道
@@ -62,11 +67,24 @@ def overnight_mask(pn, active, t: int) -> np.ndarray:
     return okt & (ev.sum(1) >= int(b.overnight_min_events)) & (np.nan_to_num(rmed) >= float(b.overnight_ratio))
 
 
+def extreme_days(pn) -> tuple[np.ndarray, np.ndarray]:
+    """v3.1 極端日（分點 × 日 bool）：正向、負向"""
+    import pandas as pd
+    c = P.dim_c
+    n = pn.B - pn.S
+    a = np.abs(n)
+    q = pd.DataFrame(np.where(a > 0, a, np.nan).T).rolling(int(c.ext_lookback), min_periods=int(c.ext_min_nonzero)) \
+        .quantile(float(c.ext_quantile)).shift(1).to_numpy().T                     # 不含當日
+    floor = np.maximum(float(c.ext_vol_frac) * pn.volume, float(c.ext_min_shares))[None, :]
+    thr = np.fmax(q, floor)
+    ok = np.isfinite(q) & ~pn.suspended[None, :]
+    return ok & (n > 0) & (n >= thr), ok & (n < 0) & (a >= thr)
+
+
 def build_market(sids: list[str], ends: list[str]) -> dict:
     """每檔：極端日週計數（張量用）＋每個窗口結束日的候選、十分位、極端日數、Fraudar 邊"""
     from .data_layer import build_panel
     W = int(P.detection.window_days)
-    thr = float(P.detection.znet_extreme)
     fe = float(P.dim_c.fraudar_edge)
     keys: dict[str, int] = {}
     rows, info, ovn = [], {}, {}
@@ -83,8 +101,9 @@ def build_market(sids: list[str], ends: list[str]) -> dict:
         used.append(sid)
         gi = np.array([keys.setdefault(b, len(keys)) for b in pn.branches])
         _, active, z = features.scale_and_active(pn)
+        xp, xn = extreme_days(pn)
         wk = week_index(pn.dates)
-        for role, hit in ((0, z >= thr), (1, z <= -thr)):
+        for role, hit in ((0, xp), (1, xn)):
             ii, tt = np.nonzero(hit)
             if len(ii):
                 key = np.unique(np.c_[gi[ii] * 2 + role, wk[tt]], axis=0, return_counts=True)
@@ -101,13 +120,12 @@ def build_market(sids: list[str], ends: list[str]) -> dict:
             if len(cand) < 2:
                 continue
             g = (pn.B[cand, s:e + 1] + pn.S[cand, s:e + 1]).sum(1)
-            zz = z[:, s:e + 1]
-            cz = zz.sum(1)
+            cz = z[:, s:e + 1].sum(1)
             fr = [(int(gi[i]) * 2, jj) for i in np.flatnonzero(~on & (cz >= fe))] + \
                  [(int(gi[i]) * 2 + 1, jj) for i in np.flatnonzero(~on & (cz <= -fe))]
             info[(jj, end)] = {"cand": gi[cand].astype(np.int32), "dec": deciles(g).astype(np.int8),
                                "foreign": np.array([pn.btype[i] == "foreign" for i in cand]),
-                               "ext_pos": (zz[cand] >= thr).sum(1).astype(np.int16), "ext_neg": (zz[cand] <= -thr).sum(1).astype(np.int16),
+                               "ext_pos": xp[cand, s:e + 1].sum(1).astype(np.int16), "ext_neg": xn[cand, s:e + 1].sum(1).astype(np.int16),
                                "weeks": np.unique(wk[s:e + 1]).astype(np.int32), "fr_edges": fr}
         log.info("維度 C 全市場 %d/%d：%s（%d 個分點）", j + 1, len(sids), sid, len(pn.branches))
     tab = np.vstack(rows).astype(np.int64) if rows else np.zeros((0, 4), np.int64)
@@ -158,23 +176,30 @@ def background(idx: np.ndarray, val: np.ndarray, shape: tuple, at: np.ndarray | 
 
 def cp_apr(idx, val, E, shape, R, rng, mask_idx=None, mask_E=None, max_iter: int = 300, tol: float = 1e-4):
     F = [rng.random((n, R)) + 0.1 for n in shape]
-    S = [sparse.csr_matrix((np.ones(len(val)), (idx[:, m], np.arange(len(val)))), shape=(shape[m], len(val))) for m in range(3)]
     Sm = None
     if mask_idx is not None and len(mask_idx):
         Sm = [sparse.csr_matrix((np.ones(len(mask_idx)), (mask_idx[:, m], np.arange(len(mask_idx)))), shape=(shape[m], len(mask_idx))) for m in range(3)]
     prev = -np.inf
     ll = prev
+    nnz = len(val)
+    ch = int(P.dim_c.chunk_rows)
     for _ in range(max_iter):
         for m in range(3):
             a, b = [x for x in range(3) if x != m]
-            KR = F[a][idx[:, a]] * F[b][idx[:, b]]
-            model = np.einsum("nr,nr->n", F[m][idx[:, m]], KR)
-            Phi = S[m] @ (KR * (val / np.maximum(E + model, 1e-300))[:, None])
+            Phi = np.zeros((shape[m], R))
+            for lo in range(0, nnz, ch):                  # 分塊：不建出「非零格數 × 秩」的整個矩陣
+                sl = slice(lo, lo + ch)
+                ia, ib, im = idx[sl, a], idx[sl, b], idx[sl, m]
+                KR = F[a][ia] * F[b][ib]
+                model = np.einsum("nr,nr->n", F[m][im], KR)
+                w = val[sl] / np.maximum(E[sl] + model, 1e-300)
+                Phi += sparse.csr_matrix((np.ones(len(im)), (im, np.arange(len(im)))), shape=(shape[m], len(im))) @ (KR * w[:, None])
             den = np.outer(np.ones(shape[m]), F[a].sum(0) * F[b].sum(0))
             if Sm is not None:
                 den = den - Sm[m] @ (F[a][mask_idx[:, a]] * F[b][mask_idx[:, b]])
             F[m] = F[m] * Phi / np.maximum(den, 1e-300)
-        model = np.einsum("nr,nr,nr->n", F[0][idx[:, 0]], F[1][idx[:, 1]], F[2][idx[:, 2]])
+        model = np.concatenate([np.einsum("nr,nr,nr->n", F[0][idx[lo:lo + ch, 0]], F[1][idx[lo:lo + ch, 1]], F[2][idx[lo:lo + ch, 2]])
+                                for lo in range(0, nnz, ch)]) if nnz else np.zeros(0)
         total = float((F[0].sum(0) * F[1].sum(0) * F[2].sum(0)).sum())
         if Sm is not None:
             total -= float(np.einsum("nr,nr,nr->", F[0][mask_idx[:, 0]], F[1][mask_idx[:, 1]], F[2][mask_idx[:, 2]]))
@@ -442,7 +467,7 @@ def window_c(mk: dict, end: str, fits: dict, sids_detail: set | None = None) -> 
     return out
 
 
-def choose_rank(mk: dict, workers: int = 4) -> int:
+def choose_rank(mk: dict, workers: int = 2) -> int:
     from concurrent.futures import ProcessPoolExecutor
     c = P.dim_c
     fw = fit_weeks(mk)[0]
