@@ -1,0 +1,79 @@
+# 主力集團 v3 維度 C（§7）分工計算：plan（全市場彙總＋選秩）→ fit（每一次擬合一件工作，最多 20 台同時）→ windows（各窗口 p_C）
+#   中間結果含 FinMind 衍生資料：只存私人倉庫 broker-data 的 Release「dimc3」，不進 artifact
+name: dimc-v3
+on:
+  workflow_dispatch:
+    inputs:
+      per_job: { description: "每台機器幾件擬合（4 核同時）", default: "4" }
+concurrency: { group: dimc-v3, cancel-in-progress: false }
+env:
+  FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      parts: ${{ steps.p.outputs.parts }}
+      of: ${{ steps.p.outputs.of }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: 資料（FinMind 私人倉庫＋價格快取）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg" dimc
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
+          echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"
+          GH_TOKEN="${{ github.token }}" gh release download cache -R Antiugre/broker-engine --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
+          gh release view dimc3 -R Antiugre/broker-data >/dev/null 2>&1 || gh release create dimc3 -R Antiugre/broker-data --title dimc3 --notes "主力集團 v3 維度 C 中間結果（私人）"
+          gh release download dimc3 -R Antiugre/broker-data --pattern rank.json --dir dimc --clobber || true
+      - name: 全市場彙總＋選秩
+        id: p
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          python tools/dimc_v3.py plan --out dimc
+          gh release upload dimc3 -R Antiugre/broker-data dimc/market.pkl dimc/rank.json dimc/tasks.json --clobber
+          N=$(python -c "import json,math;t=json.load(open('dimc/tasks.json'));print(max(1,min(200,math.ceil(len(t['tasks'])/int('${{ inputs.per_job }}')))))")
+          echo "of=$N" >> "$GITHUB_OUTPUT"
+          echo "parts=$(python -c "import json;print(json.dumps(list(range($N))))")" >> "$GITHUB_OUTPUT"
+  fit:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: { k: "${{ fromJSON(needs.plan.outputs.parts) }}" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: 擬合
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p dimc/fits
+          gh release download dimc3 -R Antiugre/broker-data --pattern market.pkl --pattern tasks.json --dir dimc --clobber
+          python tools/dimc_v3.py fit --dir dimc --part ${{ matrix.k }} --of ${{ needs.plan.outputs.of }} --workers 4
+          ls dimc/fits/*.pkl >/dev/null 2>&1 && gh release upload dimc3 -R Antiugre/broker-data dimc/fits/*.pkl --clobber || true
+  windows:
+    needs: [plan, fit]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: 各窗口 p_C
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p dimc/fits
+          gh release download dimc3 -R Antiugre/broker-data --pattern market.pkl --pattern tasks.json --dir dimc --clobber
+          gh release download dimc3 -R Antiugre/broker-data --pattern "fit_*.pkl" --dir dimc/fits --clobber || true
+          python tools/dimc_v3.py windows --dir dimc
+          tar -czf dimc3-windows.tar.gz -C dimc windows
+          gh release upload dimc3 -R Antiugre/broker-data dimc3-windows.tar.gz --clobber

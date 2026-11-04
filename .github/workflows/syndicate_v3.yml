@@ -35,6 +35,7 @@ jobs:
           gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
           mkdir -p data/broker_flow_v3
           GH_TOKEN="${{ secrets.DATA_REPO_TOKEN }}" gh release download engine-cache -R Antiugre/broker-data --pattern broker_flow_v3_cache.tar.gz --dir . --clobber && tar -xzf broker_flow_v3_cache.tar.gz -C data/broker_flow_v3 || echo "尚無 v3 中間結果"
+          mkdir -p data/broker_flow_v3/_cache && GH_TOKEN="${{ secrets.DATA_REPO_TOKEN }}" gh release download dimc3 -R Antiugre/broker-data --pattern dimc3-windows.tar.gz --dir . --clobber && tar -xzf dimc3-windows.tar.gz -C data/broker_flow_v3/_cache && rm -rf data/broker_flow_v3/_cache/dim_c_windows && mv data/broker_flow_v3/_cache/windows data/broker_flow_v3/_cache/dim_c_windows || echo "維度 C v3 還沒算好"
       - name: Firebase 金鑰
         if: ${{ !inputs.no_upload }}
         env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
