@@ -366,6 +366,10 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
         if idx:
             docs["syndicate/_index"] = {"stock_id": "_index", "stocks": idx}
 
+    # 人工更正同步到 Firestore（管理員限定集合）：網站即時查詢（/api/history、/api/branches）據此蓋過富邦資料
+    if (ci := fm_store._corrections_raw())[0]:
+        docs["syndicate/_corrections"] = {"version": ci[1], "items": ci[0]}
+
     # meta（最後寫）
     prev_dates = (prev_meta or {}).get("dates", [])
     dates = sorted(set(prev_dates) | {date}, reverse=True)[:MAX_DATES]
