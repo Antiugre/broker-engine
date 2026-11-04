@@ -21,22 +21,24 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     log = logging.getLogger("broker_scraper")
     from broker_flow_v3 import run, split
-    docs = run.run_all(a.stocks or None, not a.no_group)
+
+    def upload(docs):
+        if a.no_upload:
+            return
+        for d in docs:
+            if d.get("kind") == "stock":
+                split.assert_writable(d["stock_id"])
+        from firebase_upload import _commit, get_client
+        items = [(f"syndicate/{docs[-1]['stock_id']}@v3", docs[-1])]
+        items.append(("syndicate/_index@v3", {"stock_id": "_index", "version": 3, "stocks": [
+            {"id": d["stock_id"], "name": d.get("stock_name") or "", "asof": d["asof"], "kind": d.get("kind", "stock")} for d in docs]}))
+        _commit(get_client(), items, label="v3")
+        log.info("v3 已上傳：%s", docs[-1]["stock_id"])
+    docs = run.run_all(a.stocks or None, not a.no_group, on_doc=upload)
     if not docs:
         log.error("v3 沒有算出結果")
         return 1
-    if a.no_upload:
-        log.info("--no-upload：%d 份結果只存本機", len(docs))
-        return 0
-    for d in docs:
-        if d.get("kind") == "stock":
-            split.assert_writable(d["stock_id"])
-    from firebase_upload import _commit, get_client
-    items = [(f"syndicate/{d['stock_id']}@v3", d) for d in docs]
-    items.append(("syndicate/_index@v3", {"stock_id": "_index", "version": 3, "stocks": [
-        {"id": d["stock_id"], "name": d.get("stock_name") or "", "asof": d["asof"], "kind": d.get("kind", "stock")} for d in docs]}))
-    _commit(get_client(), items, label="v3")
-    log.info("v3 完成：%s 已上傳", "、".join(d["stock_id"] for d in docs))
+    log.info("v3 完成：%s", "、".join(d["stock_id"] for d in docs))
     return 0
 
 
