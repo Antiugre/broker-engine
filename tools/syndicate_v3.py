@@ -28,7 +28,14 @@ def main() -> int:
         for d in docs:
             if d.get("kind") == "stock":
                 split.assert_writable(d["stock_id"])
+        import fm_store
         from firebase_upload import _commit, get_client
+        d = docs[-1]
+        if d.get("kind") == "stock" and not fm_store.upload_ok(d["stock_id"]):     # 人工更正安全閘
+            log.warning("v3 %s 這次沒有套用到人工更正，不上傳", d["stock_id"])
+            return
+        if d.get("kind") == "stock" and (st := fm_store.stamp(d["stock_id"])):
+            d["corrections"] = st
         items = [(f"syndicate/{docs[-1]['stock_id']}@v3", docs[-1])]
         items.append(("syndicate/_index@v3", {"stock_id": "_index", "version": 3, "stocks": [
             {"id": d["stock_id"], "name": d.get("stock_name") or "", "asof": d["asof"], "kind": d.get("kind", "stock")} for d in docs]}))
