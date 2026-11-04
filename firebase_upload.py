@@ -412,7 +412,7 @@ def load_state() -> dict:
         return {}
 
 
-MAX_BATCH_BYTES = 3_500_000   # 每批約 3.5 MB（Firestore 單次請求上限 10 MiB，留足餘裕）
+MAX_BATCH_BYTES = 1_500_000   # 每批約 1.5 MB（Firestore 單次請求上限 10 MiB；索引項也算在交易大小裡，11/4 曾因 Transaction too big 失敗）
 MAX_BATCH_DOCS = 200          # 每批最多 200 份（上限 500）
 
 
@@ -442,6 +442,13 @@ def _commit(db, items: list[tuple[str, dict]], *, label: str = "", tries: int = 
             log.info("  Firestore 第 %s 批：%d 份完成", label, len(items))
             return
         except Exception as e:  # noqa: BLE001 — DeadlineExceeded / ServiceUnavailable / Aborted 等
+            if "too big" in str(e).lower() and len(items) > 1:
+                # 「Transaction too big」：大小除了內容還含索引項（Order Flow 文件巢狀陣列很多）→ 對半拆開重寫，不算重試次數
+                h = len(items) // 2
+                log.warning("  Firestore 第 %s 批太大（%d 份），拆成兩半重寫", label, len(items))
+                _commit(db, items[:h], label=f"{label}a", tries=tries)
+                _commit(db, items[h:], label=f"{label}b", tries=tries)
+                return
             if attempt == tries:
                 raise
             wait = 15 * attempt
