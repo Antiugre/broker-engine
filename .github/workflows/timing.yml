@@ -3,6 +3,8 @@
 #   FinMind 資料只放 $RUNNER_TEMP（不進 artifact、不進公開快取）
 name: timing
 on:
+  schedule:
+    - cron: "45 14 * * 1-5"        # 台灣時間 22:45（FinMind 21:40 更新、Order Flow 之後）；結果只寫管理員限定文件
   workflow_dispatch:
     inputs:
       stocks: { description: "只算這些股票（空白＝全部有長期價格的股票）", required: false }
@@ -55,6 +57,6 @@ jobs:
         run: |
           ARGS="${{ inputs.stocks }} --processes ${{ inputs.processes || '4' }}"
           [ -n "${{ inputs.reps }}" ] && ARGS="$ARGS --reps ${{ inputs.reps }}"
-          [ "${{ inputs.validate }}" = "true" ] && ARGS="$ARGS --validate"
+          [ "${{ inputs.validate }}" != "false" ] && ARGS="$ARGS --validate"     # 排程執行沒有 inputs → 預設也跑驗證
           [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
           python tools/timing_v1.py $ARGS
