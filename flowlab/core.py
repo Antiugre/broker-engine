@@ -39,6 +39,7 @@ class StockContext:
     company: dict | None = None            # {city, district, zip}（地緣比對用）
     zip_table: dict | None = None          # {(city, district): zip3}
     params: dict = field(default_factory=dict)
+    bp: pd.DataFrame | None = None         # 交易日 × 分點：分點當日買進均價（FinMind Sponsor Pro；沒有的格子 NaN）
     _cache: dict = field(default_factory=dict, repr=False)
 
     # ── 常用衍生矩陣（第一次取用時計算，之後快取）──
@@ -84,7 +85,8 @@ class StockContext:
         keep = idx[pos:]
         return StockContext(self.stock_id, self.stock_name, self.asof, self.px.loc[keep], self.buy.loc[keep],
                             self.sell.loc[keep], self.meta, self.company, self.zip_table,
-                            {**self.params, "range_start": start, "horizon": horizon})
+                            {**self.params, "range_start": start, "horizon": horizon},
+                            None if self.bp is None else self.bp.loc[keep])
 
     def is_institutional(self, key: str) -> bool:
         name = self.meta.get(key, {}).get("broker") or ""

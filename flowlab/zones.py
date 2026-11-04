@@ -4,8 +4,10 @@ flowlab.zones — 模組三：大戶成本防守區（Cost Support Zone）、模
 成本防守區（全部 rolling 向量化，每個交易日都有一筆 → 前端直接畫成帶狀區）
   成員 Mᵢ,d = 「近 20 日內曾被標為波段鎖碼」或「與公司同地緣（權重 > 1）」
   g_d      = Σᵢ∈M max(淨買ᵢ,d, 0)                            成員當日建倉張數
-  mid_d    = Σ₂₀ g·VWAP / Σ₂₀ g                               近 20 日建倉的加權平均成本
-  sd_d     = √(Σ₂₀ g·VWAP² / Σ₂₀ g − mid²)                    成本分散度
+  mid_d    = Σ₂₀ Σᵢ gᵢ·Pᵢ / Σ₂₀ g                             近 20 日建倉的加權平均成本
+  sd_d     = √(Σ₂₀ Σᵢ gᵢ·Pᵢ² / Σ₂₀ g − mid²)                  成本分散度
+             Pᵢ,d＝分點 i 當日真實買進均價（FinMind Sponsor Pro）；只用真實價格，沒有真實價格的建倉不列入（不用均價估算）
+             沒有 FinMind 資料（富邦備用路徑、本機查詢）→ 不輸出防守區
   upper    = mid + 0.5·sd，lower = mid − 1.0·sd（半寬至少 1%）  支撐偏下緣
   輸出：[{date, price_upper, price_lower, price_mid, lots, signal_type}]，不含任何圖表套件語法
 
@@ -48,11 +50,20 @@ class CostZoneAnalyzer(Analyzer):
         pos = ctx.net.clip(lower=0)
         g_lock = pos.where(lock_m, 0).sum(axis=1)
         g_geo = pos.where(geo_m & ~lock_m, 0).sum(axis=1)
+        if ctx.bp is None:                                                 # 沒有分點真實價格：不估算
+            return {"latest": None, "series": [], "cost_basis": "none"}
+        gm = pos.where(lock_m | geo_m, 0)                                  # 成員各自的建倉張數
+        P = ctx.bp.reindex(index=gm.index, columns=gm.columns)
+        ok = P.notna() & (P > 0)
+        gm = gm.where(ok, 0)                                               # 沒有真實買價的建倉不列入
+        P = P.where(ok, 0)
+        g_lock = gm.where(lock_m, 0).sum(axis=1)
+        g_geo = gm.where(geo_m & ~lock_m, 0).sum(axis=1)
         g = g_lock + g_geo
-        vw = ctx.px["vwap"]
+        gp, gp2 = (gm * P).sum(axis=1), (gm * P * P).sum(axis=1)
         den = g.rolling(w, min_periods=1).sum()
-        mid = (g * vw).rolling(w, min_periods=1).sum() / den.replace(0, np.nan)
-        sd = np.sqrt(((g * vw * vw).rolling(w, min_periods=1).sum() / den.replace(0, np.nan) - mid ** 2).clip(lower=0))
+        mid = gp.rolling(w, min_periods=1).sum() / den.replace(0, np.nan)
+        sd = np.sqrt((gp2.rolling(w, min_periods=1).sum() / den.replace(0, np.nan) - mid ** 2).clip(lower=0))
         half_min = mid * ctx.p("zone_min_half", 0.01)
         upper = mid + np.maximum(ctx.p("zone_up_sd", 0.5) * sd, half_min)
         lower = mid - np.maximum(ctx.p("zone_dn_sd", 1.0) * sd, half_min)
@@ -68,7 +79,7 @@ class CostZoneAnalyzer(Analyzer):
             c = float(ctx.px["close"].iloc[-1])
             latest = {**latest, "close": r(c, 2), "position": "above" if c > latest["price_upper"] else "below" if c < latest["price_lower"] else "inside",
                       "gap": r(c / latest["price_mid"] - 1, 4)}
-        return {"latest": latest, "series": series}
+        return {"latest": latest, "series": series, "cost_basis": "branch"}     # 分點真實買進均價（FinMind）
 
 
 @register_analyzer

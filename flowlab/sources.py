@@ -108,22 +108,27 @@ def build_context(sid: str, day: str, branches: dict[str, dict], histories: dict
             px[c] = float("nan")
     px["vwap"] = px["vwap"].fillna(px["close"])
     px = px.dropna(subset=["close"]).tail(keep_days)
-    buy, sell = {}, {}
+    buy, sell, bprice = {}, {}, {}
     for k, rows in histories.items():
         if not rows:
             continue
         df = pd.DataFrame(rows)
         df["date"] = pd.to_datetime(df["date"])
+        if "buy_price" in df:            # FinMind：分點當日真實買進均價（富邦備用路徑沒有）
+            bp = pd.to_numeric(df["buy_price"], errors="coerce").where(pd.to_numeric(df["buy"], errors="coerce") > 0)
+            bprice[k] = bp.groupby(df["date"]).max()
         df = df.groupby("date")[["buy", "sell"]].sum()
         buy[k], sell[k] = df["buy"], df["sell"]
     B = pd.DataFrame(buy).reindex(px.index).fillna(0.0)
     S = pd.DataFrame(sell).reindex(px.index).fillna(0.0)
+    BP = pd.DataFrame(bprice).reindex(index=px.index, columns=B.columns) if bprice else None
     name = next((b.get("stock_name") for b in branches.values() if b.get("stock_name")), None)
     meta = {k: {x: b.get(x) for x in ("broker", "branch_id", "broker_id", "b_raw", "city", "district", "address")}
             for k, b in branches.items()}
     return StockContext(stock_id=sid, stock_name=name, asof=px.index[-1].strftime("%Y-%m-%d") if len(px) else day,
                         px=px[["vwap", "close", "vol"]].astype(float), buy=B.astype(float), sell=S.astype(float),
-                        meta=meta, company=company, zip_table=zips, params=params or {})
+                        meta=meta, company=company, zip_table=zips, params=params or {},
+                        bp=None if BP is None else BP.astype(float))
 
 
 def extract_context(fetcher, sid: str, day: str, params: dict | None = None, max_branches: int = 60) -> StockContext | None:
