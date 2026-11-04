@@ -208,7 +208,7 @@ jobs:
 
   syndicate:
     needs: flow
-    if: ${{ always() && (needs.flow.result == 'success' || inputs.start == 'syndicate') }}
+    if: ${{ always() && (needs.flow.result == 'success' || inputs.start == 'syndicate') && (!inputs.stocks || inputs.start == 'syndicate') }}   # 指定股票的測試執行不跑主力集團（它不看股票清單、會跑好幾小時）
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
