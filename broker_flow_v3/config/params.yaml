@@ -1,0 +1,132 @@
+# 主力集團偵測 v3（《主力集團偵測 v3 修正規格》2026-11-04）：事先固定參數
+# 修改規則：寫入 broker_flow_v3/CHANGELOG.md 並註明規格條目，理由不得來自驗證結果。未列出者同 v2。
+version: 3
+
+governance:                   # §2
+  t_cut: "2026-11-04"         # §2.1 寫死、不滾動
+  holdout_seed: 20261104
+  holdout_group_frac: 0.5
+  holdout_stock_frac: 0.2
+  max_diagnostic_rounds: 3
+  dev_stocks: ["2601", "5907"]
+  dev_groups: ["2601G"]
+
+universe:                     # §2.3
+  top_n: 800
+  lookback: 60
+
+data:                         # §3.1
+  finmind_start: "2021-06-30"
+  imbalance_max: 0.02
+  avg_price_tol: 0.01
+
+exclude_foreign: false
+
+revision:
+  b2_sell_mult: 2.0
+  b2_sell_min_lots: 10
+  b2_absorb_ratio: 0.1
+  b2_vwap_tol: 0.005
+  b2_seller_below_vwap: true  # §6.2
+  loss_leg_vwap_tol: 0.01
+
+dim_b:
+  cold_quantile: 0.2
+  cold_min_lots: 5
+  participate: 0.1
+  frechet_min_lots: 1
+  n_null: 50
+  cond_p_min_nonzero_null: 20 # §6.1 M
+
+groups:
+  - id: "2601G"
+    name: "益航集團"
+    members:
+      - {sid: "2601", from: "2000-01-01", to: "2099-12-31"}
+      - {sid: "5907", from: "2000-01-01", to: "2025-11-30"}
+    known_branches: []
+    fake_groups: 50
+    exclude_from_fake: ["2601", "5907"]
+
+accounting:
+  warmup_days: 180
+  fee_rate: 0.001425
+  fee_discount: 1.0                 # §3.4
+  fee_discount_sensitivity: 0.3
+  tax_sell: 0.003
+  tax_daytrade: 0.0015
+  short_lot_enabled: true           # §3.3
+  margin_unit_shares: 1000          # §3.3 需確認：融券賣出（張）→ 股；借券賣出本來就是股（執行時兩者交叉核對寫進 log）
+
+behavior:
+  rolling_days: 120
+  activity_basis: net               # §4.1
+  exclude_daytrade_type: false      # §4.1
+  daytrade_ratio: 0.6
+  overnight_event_mult: 2.0
+  overnight_ratio: 0.7
+  overnight_min_events: 5
+  min_active_days: 10
+  sc_min_shares: 10000              # §4.2
+  sc_min_vol_frac: 0.01
+  sc_z: 3
+  sc_mad_floor: 0.01                # SPEC-GAP-v3：MAD = 0 時的下限
+  sc_min_events: 3
+  gov_bank_names: ["臺銀", "台銀", "土銀", "合庫", "第一金", "華南", "彰銀", "兆豐", "台企銀"]   # SPEC-GAP-v3：名稱比對
+
+detection:
+  window_days: 120
+  window_step: 20
+  min_candidate_active: 5
+  active_min_shares: 1000
+  active_scale_mult: 0.5
+  lambda_gamma: 1.0                 # §5.1
+  lambda_delta: 1.0
+  alpha_bound: 12.0                 # SPEC-GAP-v3：分點固定效果不懲罰，數值上限 |α| ≤ 12（全活躍／全不活躍的分點）
+  mag_min_common: 20
+  mag_null_perms: 200               # §5.3
+  mag_shift_min: 10
+  znet_extreme: 2
+
+dim_c:
+  enabled: false                    # 今晚上線版：維度 C 在背景以新架構計算，完成後打開
+  background_offset: true
+  null_same_procedure: true
+  scp_require_extreme_days: 1
+  max_missing_week_frac: 0.5
+  fit_weeks: 104
+  refit_weeks: 13
+  rank_candidates: [10, 20, 40, 60, 80, 100]
+  inits: 5                        # §7.3：計算時間不夠 → 觀測與虛無「同時」降低（10 → 5 組初始值、穩定門檻 8 → 4）
+  fms_min: 0.8
+  stable_min: 4
+  appear_stock: 0.02
+  appear_weeks: 0.05
+  fraudar_edge: 3
+  fraudar_blocks: 20
+  null_cp: 20
+  null_fr: 50
+  refit_change: 0.05
+
+nulls:
+  gpd_max_null: 1000000
+  gpd_quantile: 0.99
+  gpd_min_exceed: 30                # §7.6
+
+fusion:
+  fdr_q: 0.05
+  fdr_family: window                # §8.2
+  opp_require_corroboration: true   # §8.1
+  opp_corroboration_alpha: 0.05
+  group_inventory_share: 0.005
+  min_core_size: 3                  # §8.3
+  p_clip: 1.0e-15
+
+group_mode:
+  branch_combine: simes             # §9.1
+  detail_windows: 6
+  fake_windows: 6                   # SPEC-GAP-v3（今晚上線版）：假集團對照只算最近 6 個窗口
+
+validation:
+  naive_last_days: 20
+  naive_top: 10
