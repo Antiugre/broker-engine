@@ -1,9 +1,7 @@
-# 主力集團偵測 v3（《主力集團偵測 v3 修正規格》）：開發集 2601、5907、2601G → syndicate/{代號}@v3（管理員限定，與 v2 並存）
+# 【已停用 2026-11-05：擁有者判斷模型沒有統計意義，移除功能；只保留手動執行】主力集團偵測 v3（《主力集團偵測 v3 修正規格》）：開發集 2601、5907、2601G → syndicate/{代號}@v3（管理員限定，與 v2 並存）
 #   FinMind 資料只放 $RUNNER_TEMP（不進 artifact、不進公開快取）；中間結果存私人倉庫 broker-data 的 Release「engine-cache」
 name: syndicate-v3
 on:
-  schedule:
-    - cron: "30 14 * * 1-5"        # 台灣時間 22:30（FinMind 21:40 更新之後）
   workflow_dispatch:
     inputs:
       stocks: { description: "只算這些股票（空白＝開發集）", required: false }
