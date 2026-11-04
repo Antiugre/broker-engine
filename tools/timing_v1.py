@@ -20,6 +20,9 @@ def main() -> int:
     ap.add_argument("--no-upload", action="store_true")
     ap.add_argument("--processes", type=int, default=1)
     ap.add_argument("--reps", type=int, default=None, help="EI bootstrap 次數（預設 params.yaml 的 999）")
+    ap.add_argument("--validate", action="store_true", help="算完後跑 §9 真實資料驗證（安慰劑、合成注入、案例），結果寫 syndicate/_validation@timing")
+    ap.add_argument("--val-hosts", type=int, default=40)
+    ap.add_argument("--val-reps", type=int, default=5)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     log = logging.getLogger("broker_scraper")
@@ -52,6 +55,16 @@ def main() -> int:
         log.error("擇時 沒有算出結果")
         return 1
     log.info("擇時 完成：%d 檔", len(docs))
+    if a.validate:
+        from broker_timing import validate_run
+        v = validate_run.run_validation(run.LAST_RESULTS, processes=a.processes, hosts=a.val_hosts, reps=a.val_reps)
+        import json
+        (run.out_dir() / "validation.json").write_text(run.dumps(v), encoding="utf-8")
+        if not a.no_upload:
+            from firebase_upload import _commit, get_client
+            _commit(get_client(), [("syndicate/_validation@timing", {"stock_id": "_validation", **json.loads(run.dumps(v))})],
+                    label="timing-validation")
+            log.info("擇時驗證 已上傳（管理員限定）")
     return 0
 
 
