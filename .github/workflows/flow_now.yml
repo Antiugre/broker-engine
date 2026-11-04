@@ -46,7 +46,7 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
-          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --pattern "corrections.json" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
             echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
           else echo "FinMind 資料下載失敗"; exit 1; fi
       - name: 取得資料

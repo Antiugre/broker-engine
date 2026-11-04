@@ -68,7 +68,7 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
-          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --pattern "corrections.json" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
             echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
           else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 還原長期資料快取
@@ -117,7 +117,7 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
-          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --pattern "corrections.json" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
             echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
           else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 接手上一段的資料
@@ -169,7 +169,7 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
-          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --pattern "corrections.json" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
             echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
           else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 接手上一段的資料
@@ -246,7 +246,7 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg"
-          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
+          if gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --pattern "corrections.json" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber; then
             echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"
           else echo "FinMind 資料下載失敗：這次全部改走富邦（備用路徑）"; fi
       - name: 還原資料（長期資料快取＋主力集團中間結果）

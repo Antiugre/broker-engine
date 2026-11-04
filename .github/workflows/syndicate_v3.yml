@@ -25,7 +25,7 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg" "$RUNNER_TEMP/finmind/TDR" "$RUNNER_TEMP/finmind/aux_year"
-          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --pattern "corrections.json" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
           gh release download TDR-by-stock -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/TDR" --clobber || echo "價位明細下載失敗：維度 B 不計算"
           gh release download aux -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/aux_year" --clobber || echo "輔助資料年檔還沒有：改用逐檔查詢"
           echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"/*

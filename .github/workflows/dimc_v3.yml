@@ -24,7 +24,7 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
         run: |
           mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg" dimc
-          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --pattern "corrections.json" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
           echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"
           GH_TOKEN="${{ github.token }}" gh release download cache -R Antiugre/broker-engine --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
           gh release view dimc3 -R Antiugre/broker-data >/dev/null 2>&1 || gh release create dimc3 -R Antiugre/broker-data --title dimc3 --notes "主力集團 v3 維度 C 中間結果（私人）"
