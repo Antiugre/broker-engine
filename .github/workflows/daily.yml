@@ -38,7 +38,7 @@ on:
         default: false
 
 concurrency:
-  group: daily-pipeline
+  group: daily-pipeline-v2         # 11/4 改名：舊的測試執行卡在取消中，避免擋住每晚的例行計算
   cancel-in-progress: false
 
 permissions:
