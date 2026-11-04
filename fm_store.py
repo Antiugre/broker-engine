@@ -151,7 +151,44 @@ def stamp(sid: str) -> dict | None:
     """寫進輸出文件的更正紀錄（網站上可確認套用了哪一版）"""
     if sid not in corrected_stocks():
         return None
-    return {"version": corrections_hash(), "applied": applied(sid), "items": applied_items(sid)}
+    return {"version": corrections_hash(), "applied": applied(sid), "items": applied_items(sid), "holdings": corrected_holdings(sid)}
+
+
+def corrected_holdings(sid: str) -> list[dict]:
+    """有更正的分點：用 FinMind（已套用更正）逐日算目前持股與成本（與 flowlab.costs 同一套：淨買用分點真實買價加權、淨賣不改成本、歸零重算；
+    淨買卻沒有真實買價 → 不給成本）"""
+    if not enabled():
+        return []
+    import math
+    df = stock_table(sid)
+    out, seen = [], set()
+    for x in _corrections_raw()[0]:
+        if str(x["stock_id"]) != sid:
+            continue
+        bid = _corr_bid(sid, x, df)
+        if not bid or bid in seen:
+            continue
+        seen.add(bid)
+        g = df[df["securities_trader_id"].astype(str) == bid].sort_values("date")
+        inv = cost = 0.0; since = None; bad = False; last = None
+        for r in g.itertuples():
+            n = float(r.buy_volume) - float(r.sell_volume)
+            last = str(r.date)
+            if n > 0:
+                bp = float(r.buy_price) if r.buy_price is not None and not math.isnan(float(r.buy_price)) else 0.0
+                if bp <= 0:
+                    bad = True
+                if inv <= 0:
+                    since = str(r.date)
+                cost = (inv * cost + n * bp) / (inv + n)
+                inv += n
+            elif n < 0:
+                inv = max(0.0, inv + n)
+            if inv <= 0:
+                inv, cost, since = 0.0, 0.0, None
+        out.append({"securities_trader": x.get("securities_trader"), "branch_id": bid, "lots": round(inv / LOT, 3),
+                    "cost": None if bad or inv <= 0 else round(cost, 2), "since": since, "asof": last})
+    return out
 
 
 def applied_items(sid: str) -> list[dict]:
