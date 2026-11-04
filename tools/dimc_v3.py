@@ -39,7 +39,15 @@ def plan(out: Path, sids: list[str] | None) -> int:
     sids = sids or sorted(p.parent.name for p in (DATA_DIR / "longhist").glob("*/_prices.json"))
     ends = _ends()
     mk = dim_c.build_market(sids, ends)
-    log.info("全市場 %d 檔、%d 個分點、張量非零 %d、窗口 %d（%.0f 秒）", len(mk["sids"]), len(mk["keys"]), len(mk["tab"]), len(ends), time.time() - t0)
+    log.info("全市場 %d 檔、%d 個分點、極端日週計數 %d 筆、窗口 %d（%.0f 秒）", len(mk["sids"]), len(mk["keys"]), len(mk["tab"]), len(ends), time.time() - t0)
+    from broker_flow_v3.params import P as _P
+    fws = dim_c.fit_weeks(mk)
+    sizes = {fw: len(dim_c.tensor(mk, fw)[1]) for fw in fws}
+    log.info("v3.1 各擬合週張量非零格數：%s", sizes)
+    big = {fw: n for fw, n in sizes.items() if n > int(_P.dim_c.max_tensor_nnz)}
+    if big:
+        log.error("v3.1：張量非零格數超過上限 %d（%s），依規格停止並回報，不自行調整門檻", int(_P.dim_c.max_tensor_nnz), big)
+        return 2
     dim_c.save(mk, out / "market.pkl")
     rank_f = out / "rank.json"
     if not rank_f.exists():
