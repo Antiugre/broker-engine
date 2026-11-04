@@ -8,6 +8,7 @@ on:
       stocks: { description: "只算這些股票（空白＝全部有長期價格的股票）", required: false }
       processes: { description: "平行行程數", required: false, default: "4" }
       reps: { description: "EI bootstrap 次數（空白＝params.yaml）", required: false }
+      validate: { description: "算完後跑 §9 真實資料驗證（安慰劑、合成注入、案例）", type: boolean, default: true }
       no_upload: { description: "只測試、不上傳", type: boolean, default: false }
 concurrency: { group: timing, cancel-in-progress: false }
 jobs:
@@ -54,5 +55,6 @@ jobs:
         run: |
           ARGS="${{ inputs.stocks }} --processes ${{ inputs.processes || '4' }}"
           [ -n "${{ inputs.reps }}" ] && ARGS="$ARGS --reps ${{ inputs.reps }}"
+          [ "${{ inputs.validate }}" = "true" ] && ARGS="$ARGS --validate"
           [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
           python tools/timing_v1.py $ARGS
