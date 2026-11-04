@@ -1,0 +1,56 @@
+# 主力集團偵測 v3（《主力集團偵測 v3 修正規格》）：開發集 2601、5907、2601G → syndicate/{代號}@v3（管理員限定，與 v2 並存）
+#   FinMind 資料只放 $RUNNER_TEMP（不進 artifact、不進公開快取）；中間結果存私人倉庫 broker-data 的 Release「engine-cache」
+name: syndicate-v3
+on:
+  schedule:
+    - cron: "30 14 * * 1-5"        # 台灣時間 22:30（FinMind 21:40 更新之後）
+  workflow_dispatch:
+    inputs:
+      stocks: { description: "只算這些股票（空白＝開發集）", required: false }
+      no_group: { description: "不算集團模式", type: boolean, default: false }
+      no_upload: { description: "只測試、不上傳", type: boolean, default: false }
+concurrency: { group: syndicate-v3, cancel-in-progress: false }
+jobs:
+  v3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: FinMind 分點資料＋價位明細（私人倉庫；放在 data/ 以外）
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          mkdir -p "$RUNNER_TEMP/finmind/SecIdAgg" "$RUNNER_TEMP/finmind/TDR" "$RUNNER_TEMP/finmind/aux_year"
+          gh release download TaiwanStockTradingDailyReportSecIdAgg -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/SecIdAgg" --clobber
+          gh release download TDR-by-stock -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/TDR" --clobber || echo "價位明細下載失敗：維度 B 不計算"
+          gh release download aux -R Antiugre/broker-data --pattern "*.parquet" --dir "$RUNNER_TEMP/finmind/aux_year" --clobber || echo "輔助資料年檔還沒有：改用逐檔查詢"
+          echo "FM_DIR=$RUNNER_TEMP/finmind" >> "$GITHUB_ENV"; du -sh "$RUNNER_TEMP/finmind"/*
+      - name: 還原資料（價格快取＋v3 中間結果）
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release download cache --pattern data_cache.tar.gz --dir . --clobber && python tools/cache_bundle.py unpack --file data_cache.tar.gz
+          mkdir -p data/broker_flow_v3
+          GH_TOKEN="${{ secrets.DATA_REPO_TOKEN }}" gh release download engine-cache -R Antiugre/broker-data --pattern broker_flow_v3_cache.tar.gz --dir . --clobber && tar -xzf broker_flow_v3_cache.tar.gz -C data/broker_flow_v3 || echo "尚無 v3 中間結果"
+      - name: Firebase 金鑰
+        if: ${{ !inputs.no_upload }}
+        env: { SA: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" }
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          echo "FIREBASE_CREDENTIALS=$RUNNER_TEMP/sa.json" >> "$GITHUB_ENV"
+      - name: 主力集團 v3
+        run: |
+          ARGS="${{ inputs.stocks }}"
+          [ "${{ inputs.no_group }}" = "true" ] && ARGS="$ARGS --no-group"
+          [ "${{ inputs.no_upload }}" = "true" ] && ARGS="$ARGS --no-upload"
+          python tools/syndicate_v3.py $ARGS
+      - name: 存 v3 中間結果（私人倉庫）
+        if: ${{ always() && !inputs.no_upload }}
+        env: { GH_TOKEN: "${{ secrets.DATA_REPO_TOKEN }}" }
+        run: |
+          [ -d data/broker_flow_v3/_cache ] || exit 0
+          tar -czf broker_flow_v3_cache.tar.gz -C data/broker_flow_v3 _cache
+          gh release upload engine-cache -R Antiugre/broker-data broker_flow_v3_cache.tar.gz --clobber
