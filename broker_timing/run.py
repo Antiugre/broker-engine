@@ -331,7 +331,8 @@ def finalize_stock(res: dict, stock_name: str = "", asof: str | None = None, wri
                 "marks": [[str(sub.dates[t]), round(float(n_full[t]) / 1000, 3)] for t in np.flatnonzero(n_full != 0)
                           if str(sub.dates[t]) >= mark_from],
                 "v3_class": vcls[k]}
-        out_rows.append({"branch": r["branch"], "name": r["name"], "branch_type": r["type"], "test": test, "descriptive": desc})
+        out_rows.append({"branch": r["branch"], "name": r["name"], "branch_type": r["type"], **_web_ids(r["branch"], r["name"]),
+                         "test": test, "descriptive": desc})
     out_rows.sort(key=lambda x: (x["test"]["code"], x["test"]["qE"] if x["test"]["qE"] is not None else 1.0))
     from broker_flow_v3.params import P
     doc = {"stock_id": sid, "stock_name": stock_name, "kind": "timing", "version": VERSION, "timing_version": str(TP.timing_version),
@@ -346,6 +347,16 @@ def finalize_stock(res: dict, stock_name: str = "", asof: str | None = None, wri
                                         "holdings", "trend", "last_action"]},
            "spec_gaps": [{"item": x, "note": y} for x, y in SPEC_GAPS]}
     return cap_size(doc)
+
+
+def _web_ids(bid: str, name: str) -> dict:
+    """網頁點分點 → K 線標記要用富邦的 broker_id、b_raw（同 broker_flow_v3.data_layer.fubon_keys）；查不到就留給網頁自己推"""
+    try:
+        import fm_store
+        x = fm_store.fubon_row(str(bid), str(name))
+        return {"broker_id": x["broker_id"], "b_raw": x["b_raw"]}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 MAX_DOC_BYTES = 900_000          # SPEC-GAP-timing：Firestore 單一文件上限 1 MiB，保留餘裕
@@ -386,6 +397,7 @@ def universe() -> list[str]:
 
 
 _WORKER: dict = {}
+LAST_RESULTS: list[dict] = []
 
 
 def _worker_analyze(sid: str) -> dict | None:
@@ -418,6 +430,7 @@ def run_all(stocks: list[str] | None = None, processes: int = 1, on_doc: Callabl
     else:
         results = [r for r in map(_worker_analyze, todo) if r]
     assign_q(results)
+    LAST_RESULTS[:] = results                                    # §9 驗證（tools/timing_validate.py）直接沿用這次的結果
     docs = []
     for res in results:
         try:
