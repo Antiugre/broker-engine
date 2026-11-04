@@ -64,6 +64,46 @@ def adapter_longhist(sid: str) -> dict[str, pd.DataFrame]:
     return {"branch_daily": bd, "daily_prices": daily, "branch_master": pd.DataFrame(master)}
 
 
+def adapter_finmind(sid: str) -> dict[str, pd.DataFrame] | None:
+    """FinMind（Sponsor Pro）全部分點的每日買賣股數與分點買／賣均價；價格仍用 longhist/_prices.json。
+    FinMind 不能用（沒有資料、太舊）→ None，呼叫端改用 adapter_longhist（富邦，保留作備用）"""
+    import datetime as dt
+
+    import fm_store
+    from history import history_key
+    if not fm_store.enabled() or not (LONG_DIR / sid / "_prices.json").exists():
+        return None
+    df = fm_store.stock_table(sid)
+    last = fm_store.last_date()
+    if not len(df) or not last:
+        return None
+    base = adapter_longhist_prices(sid)
+    if (dt.date.fromisoformat(str(base["date"].iloc[-1])) - dt.date.fromisoformat(last)).days > fm_store.STALE_DAYS:
+        return None
+    names = df.drop_duplicates("securities_trader_id", keep="last").set_index("securities_trader_id")["securities_trader"]
+    key = {bid: history_key({"b_raw": fm_store.fubon_row(str(bid), str(n))["b_raw"]}) for bid, n in names.items()}
+    master = pd.DataFrame({"branch_id": [key[b] for b in names.index],
+                           "name": [fm_store.fubon_row(str(b), str(n))["broker"] for b, n in names.items()]})
+    master["branch_type"] = master["name"].map(branch_type)
+    master = master.drop_duplicates("branch_id")
+    bd = pd.DataFrame({"date": df["date"], "stock_id": sid, "branch_id": df["securities_trader_id"].map(key),
+                       "buy_shares": df["buy_volume"].astype(float), "sell_shares": df["sell_volume"].astype(float),
+                       "buy_price": df["buy_price"].astype(float), "sell_price": df["sell_price"].astype(float)})
+    bd = bd.groupby(["date", "stock_id", "branch_id"], as_index=False).agg(
+        buy_shares=("buy_shares", "sum"), sell_shares=("sell_shares", "sum"), buy_price=("buy_price", "max"), sell_price=("sell_price", "max"))
+    return {"branch_daily": bd, "daily_prices": base, "branch_master": master.reset_index(drop=True), "source": "finmind"}
+
+
+def adapter_longhist_prices(sid: str) -> pd.DataFrame:
+    prices = json.loads((LONG_DIR / sid / "_prices.json").read_text(encoding="utf-8")).get("data") or {}
+    px = pd.DataFrame.from_dict(prices, orient="index")
+    px.index.name = "date"
+    px = px.reset_index().sort_values("date")
+    return pd.DataFrame({"date": px["date"], "stock_id": sid,
+                         "close": px["close"].astype(float), "vwap": px.get("vwap", px["close"]).astype(float).fillna(px["close"]),
+                         "volume": px["vol"].astype(float) * LOT})
+
+
 @dataclass
 class Panel:
     """一檔股票的分點 × 交易日矩陣（股）。dates 為交易日曆（以個股有成交價格的日子為準）"""
@@ -94,7 +134,16 @@ def holdout_start_index(dates: np.ndarray) -> int:
 
 
 def build_panel(sid: str, write: bool = True) -> Panel:
-    t = adapter_longhist(sid)
+    t = None
+    try:
+        t = adapter_finmind(sid)          # FinMind 優先（完整分點＋分點買賣均價）
+    except Exception as ex:  # noqa: BLE001
+        import logging
+        logging.getLogger("broker_scraper").warning("主力集團 %s：FinMind 讀取失敗（%s），改用富邦 longhist", sid, ex)
+    source = "finmind" if t else "fubon"
+    if t is None:
+        t = adapter_longhist(sid)         # 富邦（保留作備用）
+    t.pop("source", None)
     if write:
         for k, v in t.items():
             store.write(v, sid, k)
@@ -112,6 +161,13 @@ def build_panel(sid: str, write: bool = True) -> Panel:
     jj = bd["date"].map(pos).to_numpy(int)
     B[ii, jj] = bd["buy_shares"].to_numpy()
     S[ii, jj] = bd["sell_shares"].to_numpy()
+    meta = {"source": source}
+    if "buy_price" in bd:                 # 分點當日買／賣均價（FinMind）；沒有成交的格子是 NaN
+        BP = np.full(B.shape, np.nan)
+        SP = np.full(B.shape, np.nan)
+        BP[ii, jj] = np.where(bd["buy_shares"].to_numpy() > 0, bd["buy_price"].to_numpy(), np.nan)
+        SP[ii, jj] = np.where(bd["sell_shares"].to_numpy() > 0, bd["sell_price"].to_numpy(), np.nan)
+        meta.update(buy_price=BP, sell_price=SP)
     return Panel(sid, dates, list(m["branch_id"]), list(m["name"]), list(m["branch_type"]), B, S,
                  daily["close"].to_numpy(float), daily["vwap"].to_numpy(float), daily["volume"].to_numpy(float),
-                 holdout_start_index(dates))
+                 holdout_start_index(dates), meta)
