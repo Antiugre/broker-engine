@@ -8,9 +8,16 @@ revision:                     # 修正規格（反向配合／壓價轉移）
   b2_sell_mult: 2.0           # 5.1 賣方大量賣出：≥ 120 日活躍日 |淨買賣| 中位數 × 2
   b2_sell_min_lots: 10        # 5.1 且 ≥ 10 張
   b2_absorb_ratio: 0.1        # 5.1 買方承接 ≥ 賣方淨賣量 × 0.1
-  b2_vwap_tol: 0.005          # 5.1 價位重疊：VWAP 差 ≤ 收盤 0.5%（本資料源無法判斷，B2 不計算）
+  b2_vwap_tol: 0.005          # 5.1 價位重疊：VWAP 差 ≤ 收盤 0.5%（FinMind 價位明細；富邦備用路徑沒有 → B 不計算）
   b2_null: 50                 # 5.5
   loss_leg_vwap_tol: 0.01     # 6.2 虧損腿 VWAP 容差 1%
+
+dim_b:                        # 主規格 6.2 維度 B1 冷門價位共現（需要分點價位明細：FinMind）
+  cold_quantile: 0.2          # 冷門價位：V_P ≤ 當日第 20 百分位數
+  cold_min_lots: 5            # 且 V_P ≥ 5 張
+  participate: 0.1            # 參與：s_A,P ≥ 0.1 V_P 且 b_B,P ≥ 0.1 V_P
+  frechet_min_lots: 1         # 下界計分：M_P ≥ 1 張
+  n_null: 50                  # 7.1 T_B 排列次數（鍵名不能用 null：YAML 會讀成空值）
 
 run:
   test_stocks: ["2601", "5907"]   # 測試階段每晚算的股票（網頁僅管理員可見）
