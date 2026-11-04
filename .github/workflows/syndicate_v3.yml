@@ -54,4 +54,5 @@ jobs:
         run: |
           [ -d data/broker_flow_v3/_cache ] || exit 0
           tar -czf broker_flow_v3_cache.tar.gz -C data/broker_flow_v3 _cache
+          gh release view engine-cache -R Antiugre/broker-data >/dev/null 2>&1 || gh release create engine-cache -R Antiugre/broker-data --title engine-cache --notes "broker-engine 中間結果（私人）"
           gh release upload engine-cache -R Antiugre/broker-data broker_flow_v3_cache.tar.gz --clobber
