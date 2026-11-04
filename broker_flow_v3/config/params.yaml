@@ -139,3 +139,58 @@ group_mode:
 validation:
   naive_last_days: 20
   naive_top: 10
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 單一分點擇時偵測 v1.1.2（凍結版，docs/timing_spec_v1.1.2.md §10）。不影響上方 v3 參數。
+# 修改規則：寫入 broker_timing/CHANGELOG.md 並註明規格條目，理由不得來自驗證結果。
+timing:
+  timing_version: "1.1.2+r2"         # 診斷第 2 輪：§3.4 單日超額對數報酬、§4.4 反向迴歸 + Hunter–Worsley，見 broker_timing/CHANGELOG.md
+  price_load_start: "2020-11-01"     # §3.1
+  min_history_days: 120              # §3.1
+  horizons: [5, 10, 20, 40]          # §4.3
+  sample_end_buffer: 40              # §4.1
+  beta_lookback: 120                 # §3.4
+  beta_min_obs: 60                   # SPEC-GAP-timing：滾動窗口內有效日報酬不足 60 筆 → β 為 NaN（該日不進樣本）
+  industry_min_peers: 5              # §3.4
+  ridge_lambda: 0.01                 # §4.2：目標函數除以 N_act；sklearn alpha = λ · N_act
+  reaction_features: ["min(r_t,0)", "r_{t-1}", "sum_r_5", "sum_r_20", "pos20_{t-1}", "log((V_{t-1}+1)/(Vmed+1))", "min(r_mkt_t,0)"]
+  reaction_feature_eplus: "max(r_t,0)"   # §4.5 E+
+  pos20_basis: adj_close             # §4.2
+  pos20_window: 20
+  volume_median_window: [61, 2]      # §4.2：Ṽ_{t−1} = [t−61, t−2] 的成交量中位數
+  hac_lag: 40                        # §4.4 堆疊式 Newey–West
+  hac_inference: reverse_hw          # 第 2 輪：反向迴歸分數 + Bartlett score_hac_lag + 標準常態 + Hunter–Worsley；第 1 輪 fixed_b、原文 t_geff 可重現
+  score_hac_lag: 5                   # 第 2 輪：反向迴歸分數的 Bartlett 延遲（事先定的單一值，不調整）
+  fixedb_table: "fixedb-exactqf-v1"  # 有限 T 高斯二次型的精確反轉（鞍點垂直線積分）+ PCHIP 網格；見 broker_timing/fixedb.py
+  fixedb_max_grid: 2000              # SPEC-GAP-timing：T > 2000 時以 2000 格點、b 不變近似
+  block_len_geff: 20                 # §4.4
+  multi_horizon_combine: hunter_worsley    # 第 2 輪：Hunter–Worsley 上界（原文 cheverud_nyholt：M_eff × 單變量尾機率；M_eff 仍輸出供參考）
+  ei_max_discard_frac: 0.10          # §4.5
+  p_floor: 1.0e-15                   # §4.4
+  ei_bootstrap_block: 40             # §4.5
+  ei_bootstrap_reps: 999
+  ei_ci_level: 0.90
+  rho_threshold: 0.5                 # §4.5、§5：Δ = θ^EI − 0.5 θ^E
+  rho_display_max_drop: 0.10
+  min_active_days: 40                # §6.1
+  min_geff: 8
+  min_cycles: 3                      # §6.1、§6.2
+  few_cycles_flag: 5                 # 完整循環 < 5 標「樣本偏少」
+  zigzag_amount_ntd: 5000000         # §6.2
+  zigzag_median_mult: 5
+  min_volume_share: 0.005            # §6.1
+  fdr_q: 0.05                        # §7
+  chase_flag_p: 0.05                 # §5 當日追價旗標：p^{E+} > 0.05
+  rolling_window: 240                # §7（只描述）
+  rolling_step: 20
+  position_k: 10                     # §8（只描述）
+  pending_days: 40                   # §8
+  placebo_match: ["log_market_cap", "log_avg_trading_value", "beta_m"]   # §9.1；不同產業
+  injection_phi: [0.02, 0.05]        # §9.2
+  injection_pi: [0.1, 0.3]
+  injection_psi: [0.55, 0.6, 0.7]
+  impact_coef: 1.0
+  impact_permanent_frac: 0.5
+  injection_min_detected: 20
+  max_confusion_rate: 0.10
+  max_diagnostic_rounds: 3           # §9
