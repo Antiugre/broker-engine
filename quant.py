@@ -410,6 +410,8 @@ def load_branch_history(fetcher, sid: str, row: dict, end: dt.date, today: dt.da
     fm_rows = _from_finmind(sid, key, today, end, extra_rows)
     if fm_rows is not None:          # FinMind（Sponsor Pro）優先；拿不到才走下面原本的富邦路徑（保留作備用）
         return fm_rows
+    if os.environ.get("FM_DIR"):
+        log.info("[%s] %s（%s）FinMind 沒有，改走富邦", sid, row.get("broker"), key)
     path = LONG_DIR / sid / f"{key}.json"
     cache = _read(path) or {}
     floor = today - dt.timedelta(days=LONG_DAYS)
@@ -518,6 +520,8 @@ def range_record(fetcher, sid: str, day: str, days: int = 30) -> dict:
     if rec is not None:
         _write(fm_path, rec)
         return rec
+    if os.environ.get("FM_DIR"):
+        log.info("[%s] 區間榜 %s～%s：FinMind 還沒有到 %s 的資料，改走富邦", sid, start, day, day)
     check_deadline()
     rec = parse_page(fetcher.get(f"{BASE_URL}?a={sid}&e={start.year}-{start.month}-{start.day}&f={end.year}-{end.month}-{end.day}"), sid)
     _write(path, rec)
