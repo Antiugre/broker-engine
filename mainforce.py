@@ -50,6 +50,30 @@ def _institutional(name: str) -> bool:
     return any(h in (name or "") for h in INSTITUTIONAL_HINTS)
 
 
+def branch_sources(sid: str, d):
+    """每個分點的（key, 名稱, 每日 DataFrame[date, buy, sell(, buy_price)]）：FinMind（Sponsor Pro）優先，
+    不能用時讀 longhist（富邦，保留作備用）"""
+    try:
+        import fm_store
+        fm = fm_store.branch_series(sid)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("[%s] FinMind 分點讀取失敗（%s），改讀 longhist", sid, ex)
+        fm = None
+    if fm:
+        return fm
+    out = []
+    for f in sorted(d.glob("*.json")):
+        if f.name.startswith("_"):
+            continue
+        cache = quant._read(f) or {}
+        if not cache.get("rows"):
+            continue
+        df = pd.DataFrame(cache["rows"])
+        if not df.empty:
+            out.append((f.stem, cache.get("broker") or "", df))
+    return out
+
+
 def _holdings(net: np.ndarray, vwap: np.ndarray):
     """回傳 (庫存, 平均成本, 最近一次歸零後的起始索引)；全部向量長度相同"""
     n = len(net)
@@ -115,29 +139,23 @@ def compute(sid: str, day: str) -> dict | None:
     series: dict[str, np.ndarray] = {}
     info: dict[str, dict] = {}
     mixed = 0
-    for f in d.glob("*.json"):
-        if f.name.startswith("_"):
-            continue
-        cache = quant._read(f) or {}
-        name = cache.get("broker") or ""
-        if not cache.get("rows") or _institutional(name):
-            continue
-        df = pd.DataFrame(cache["rows"])
-        if df.empty:
+    for k, name, df in branch_sources(sid, d):
+        if _institutional(name):
             continue
         df["date"] = pd.to_datetime(df["date"])
+        bp = df.groupby("date")["buy_price"].max().reindex(idx).to_numpy(float) if "buy_price" in df else None
         df = df.groupby("date")[["buy", "sell"]].sum().reindex(idx).fillna(0.0)
         net = (df["buy"] - df["sell"]).to_numpy(float)
         if not np.any(net) or _is_flipper(net, vol):
             continue
-        hold, cost, since = _holdings(net, vwap)
+        # 成本：FinMind 有分點自己的買進均價就用它，沒有才用個股成交均價
+        hold, cost, since = _holdings(net, vwap if bp is None else np.where(np.isfinite(bp), bp, vwap))
         if hold.max() < MIN_LOTS:
             continue
         gross = float((df["buy"] + df["sell"]).to_numpy()[-250:].sum())
         if hold[-1] > 0 and gross / hold[-1] > MIXED_TURNOVER:
             mixed += 1
             continue
-        k = f.stem
         series[k] = hold
         e = loc.lookup(None, name) if loc else None
         m = {"broker": name, "city": e["city"] if e else None, "district": e["district"] if e else None}

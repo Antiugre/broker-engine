@@ -188,3 +188,24 @@ def tdr(sid: str):
     if not parts:
         return pd.DataFrame(columns=cols)
     return pd.concat(parts, ignore_index=True)
+
+
+def branch_series(sid: str):
+    """這檔股票每個分點的完整每日買賣（張）＋分點買進均價：[(longhist 檔名 key, 富邦名稱, DataFrame[date, buy, sell, buy_price])]。
+    給直接讀 longhist 的引擎（本土主力、中小型吃貨）改讀 FinMind 用；None ＝ 不能用（改讀 longhist）"""
+    if not enabled():
+        return None
+    from history import history_key
+    df = stock_table(sid)
+    if not len(df):
+        return None
+    out = []
+    for bid, g in df.groupby("securities_trader_id", sort=False):
+        name = str(g["securities_trader"].iloc[-1])
+        row = fubon_row(str(bid), name)
+        x = g[["date"]].copy()
+        x["buy"] = g["buy_volume"].to_numpy() / LOT
+        x["sell"] = g["sell_volume"].to_numpy() / LOT
+        x["buy_price"] = g["buy_price"].where(g["buy_volume"] > 0).astype(float).to_numpy()
+        out.append((history_key({"b_raw": row["b_raw"]}), row["broker"], x))
+    return out

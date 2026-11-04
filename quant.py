@@ -142,8 +142,8 @@ def _close_fifo(lots: list[Lot], qty: float, date: str, price: float, p: Params,
 
 def fifo_match(rows: list[dict], prices: dict[str, float], p: Params = DEFAULT) -> MatchResult:
     """
-    rows   [{date, buy, sell}]（張），會依日期排序
-    prices {date: 每股價格}（成交均價，缺的日子用前一個已知價格）
+    rows   [{date, buy, sell}]（張），會依日期排序；FinMind 來源另有 buy_price / sell_price（分點當日真實買／賣均價）
+    prices {date: 每股價格}（個股成交均價，缺的日子用前一個已知價格；分點沒有自己的均價時才用）
     """
     out = MatchResult()
     lots: list[Lot] = []
@@ -158,18 +158,20 @@ def fifo_match(rows: list[dict], prices: dict[str, float], p: Params = DEFAULT) 
             continue
         last_price = price
         buy, sell = float(r.get("buy") or 0), float(r.get("sell") or 0)
+        bp = r.get("buy_price") or price           # 分點真實買進均價（FinMind）；沒有就用個股成交均價
+        sp = r.get("sell_price") or price          # 分點真實賣出均價
         if p.match_mode == "gross":
             if sell:
-                _close_fifo(lots, sell, d, price, p, out)
+                _close_fifo(lots, sell, d, sp, p, out)
             if buy:
-                lots.append(Lot(d, buy, price))
+                lots.append(Lot(d, buy, bp))
         else:
             net = buy - sell
             out.intraday += min(buy, sell)
             if net > 0:
-                lots.append(Lot(d, net, price))
+                lots.append(Lot(d, net, bp))
             elif net < 0:
-                _close_fifo(lots, -net, d, price, p, out)
+                _close_fifo(lots, -net, d, sp, p, out)
     out.open_lots = lots
     return out
 

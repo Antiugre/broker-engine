@@ -108,9 +108,10 @@ def build_frame(rows: list[dict], prices: dict[str, dict], p: EdgeParams = DEFAU
         if c not in px:
             px[c] = np.nan
     px["vwap"] = px["vwap"].fillna(px["close"])
-    br = pd.DataFrame(rows or [], columns=["date", "buy", "sell"])
+    br = pd.DataFrame(rows or [], columns=["date", "buy", "sell", "buy_price", "sell_price"])
     br["date"] = pd.to_datetime(br["date"])
-    br = br.groupby("date")[["buy", "sell"]].sum()
+    br[["buy_price", "sell_price"]] = br[["buy_price", "sell_price"]].astype(float)
+    br = br.groupby("date").agg(buy=("buy", "sum"), sell=("sell", "sum"), buy_price=("buy_price", "max"), sell_price=("sell_price", "max"))
     df = px[["vwap", "close", "vol"]].join(br, how="left")
     df[["buy", "sell"]] = df[["buy", "sell"]].fillna(0).astype(float)
     df = df[df["vwap"].notna()]
@@ -119,8 +120,14 @@ def build_frame(rows: list[dict], prices: dict[str, dict], p: EdgeParams = DEFAU
     df["net"] = df["buy"] - df["sell"]
     df["intraday"] = np.minimum(df["buy"], df["sell"])       # 同日一買一賣 → 當沖部位
     df["tick"] = tick_size(df["vwap"])
-    df["buy_px"] = df["vwap"] + p.slip_ticks * df["tick"]     # 買進吃上 k 檔
+    df["buy_px"] = df["vwap"] + p.slip_ticks * df["tick"]     # 買進吃上 k 檔（沒有分點真實均價時的估計）
     df["sell_px"] = df["vwap"] - p.slip_ticks * df["tick"]    # 賣出讓 k 檔
+    # FinMind（Sponsor Pro）有分點當日真實買／賣均價：直接用（實際成交價已含滑價），當沖損益也因此是真的
+    real_b = df["buy_price"].where((df["buy"] > 0) & (df["buy_price"] > 0))
+    real_s = df["sell_price"].where((df["sell"] > 0) & (df["sell_price"] > 0))
+    df["buy_px"] = real_b.fillna(df["buy_px"])
+    df["sell_px"] = real_s.fillna(df["sell_px"])
+    df["real_px"] = real_b.notna() | real_s.notna()
     df["amt"] = df["net"] * df["vwap"] * LOT                  # 淨買超金額（元）
     df["vol3"] = df["vol"].rolling(p.signal_days, min_periods=1).sum()
     df["vol20"] = df["vol"].rolling(20, min_periods=5).mean()

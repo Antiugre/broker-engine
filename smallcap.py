@@ -162,23 +162,22 @@ def load_stock(sid: str, day: str, geo_of=None) -> dict | None:
     idx = px.index
     vwap, close, vol = px["vwap"].to_numpy(float), px["close"].to_numpy(float), px["vol"].to_numpy(float)
     keys, names, frames = [], [], []
-    for f in sorted(d.glob("*.json")):
-        if f.name.startswith("_"):
-            continue
-        cache = quant._read(f) or {}
-        name = cache.get("broker") or ""
-        if not cache.get("rows") or _institutional(name):
-            continue
-        df = pd.DataFrame(cache["rows"])
-        if df.empty:
+    from mainforce import branch_sources       # FinMind（Sponsor Pro）優先，不能用時讀 longhist（富邦備用）
+    for k, name, df in branch_sources(sid, d):
+        if _institutional(name):
             continue
         df["date"] = pd.to_datetime(df["date"])
+        bp = df.groupby("date")["buy_price"].max().reindex(idx).to_numpy(float) if "buy_price" in df else None
         df = df.groupby("date")[["buy", "sell"]].sum().reindex(idx).fillna(0.0)
         net = (df["buy"] - df["sell"]).to_numpy(float)
         if not np.any(net > 0):
             continue
+        c = np.cumsum(net)                       # FinMind 有全部分點（數百個）：庫存從沒到過門檻的小分點先略過，省記憶體
+        if np.max(c - np.minimum.accumulate(np.minimum(c, 0))) < MIN_ADD_LOTS:
+            continue
         gross = (df["buy"] + df["sell"]).to_numpy(float)
-        keys.append(f.stem); names.append(name); frames.append(branch_frame(net, gross, vwap, vol))
+        px_b = vwap if bp is None else np.where(np.isfinite(bp), bp, vwap)   # 分點真實買進均價（成本用）
+        keys.append(k); names.append(name); frames.append(branch_frame(net, gross, px_b, vol))
     if not frames:
         M = {}
     else:
