@@ -115,12 +115,16 @@ def run_stock(sid: str, ctx: dict) -> dict:
                 pf = pairs_frame(pn, w)
                 pf["best"] = np.fmin(pf["q_same"], pf["q_opp"])
                 top = pf[pf["sig_same"] | pf["sig_opp"]].nsmallest(20, "best")
+                near = not len(top)
+                if near:                                             # 沒有顯著配對：列最接近顯著的 10 對（只供參考，不當作偵測結果）
+                    top = pf[np.isfinite(pf["best"])].nsmallest(10, "best")
+                v["near_pairs"] = bool(near)
                 nm = dict(zip(pn.branches, pn.names))
                 v["top_pairs"] = [{"a": nm[x.branch_a], "b": nm[x.branch_b], "obs": int(x.obs), "rho": _r(x.rho, 3),
                                    "p_act": f3(x.p_act), "p_mag_pos": f3(x.p_mag_pos), "p_mag_neg": f3(x.p_mag_neg),
                                    "p_A_same": f3(x.p_A_same), "p_A_opp": f3(x.p_A_opp), "p_B1": f3(x.p_B1), "p_B2": f3(x.p_B2), "p_B": f3(x.p_B),
                                    "p_same": f3(x.p_same), "p_opp": f3(x.p_opp), "q_same": f3(x.q_same), "q_opp": f3(x.q_opp),
-                                   "channel": "same" if x.sig_same and (not x.sig_opp or x.q_same <= x.q_opp) else "opp",
+                                   "channel": ("same" if x.sig_same and (not x.sig_opp or x.q_same <= x.q_opp) else "opp") if not near else ("same" if not (x.q_opp < x.q_same) else "opp"),
                                    "seller": nm.get(x.seller, "") if x.seller else "", "buyer": nm.get(x.buyer, "") if x.buyer else ""}
                                   for x in top.itertuples()]
             else:
