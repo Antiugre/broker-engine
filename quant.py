@@ -400,6 +400,15 @@ def _from_finmind(sid: str, key: str, today: dt.date, end: dt.date, extra_rows: 
 
 def load_branch_history(fetcher, sid: str, row: dict, end: dt.date, today: dt.date | None = None,
                         max_age: int | None = None, extra_rows: list[dict] | None = None) -> list[dict]:
+    """分點每日買賣（FinMind 優先、富邦備用），最後一律套用人工更正（fm_store.apply_rows；任何來源都不能蓋過）"""
+    import fm_store
+    from history import history_key
+    rows = _load_branch_history(fetcher, sid, row, end, today, max_age, extra_rows)
+    return fm_store.apply_rows(sid, row.get("broker") or "", history_key(row), rows)
+
+
+def _load_branch_history(fetcher, sid: str, row: dict, end: dt.date, today: dt.date | None = None,
+                         max_age: int | None = None, extra_rows: list[dict] | None = None) -> list[dict]:
     """
     單一（股票, 分點）約 5 年的每日買賣張數
       第一次：分年抓（約 5 次請求）

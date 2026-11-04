@@ -75,59 +75,164 @@ def stock_table(sid: str):
     return _apply_corrections(sid, pd.concat(parts, ignore_index=True))
 
 
-CORR_FILE = SEC_DIR / "corrections.json"      # 使用者指定的人工更正（私人倉庫 broker-data，和月檔放同一個 Release；不放公開倉庫）
+# ─────────── 人工更正（使用者本人確認過的交易；任何資料來源都不能蓋過它）───────────
+#   檔案：私人倉庫 broker-data Release「TaiwanStockTradingDailyReportSecIdAgg」的 corrections.json（不放公開倉庫）
+#   位置：環境變數 BB_CORRECTIONS ＞ DATA_DIR/corrections.json（本機 MandM）＞ FM_DIR/SecIdAgg/corrections.json
+#   必要：雲端與本機正式執行時檔案一定要在（缺檔或格式錯誤 → 直接失敗，不照算）；只有 pytest 或 BB_ALLOW_NO_CORRECTIONS=1 可以沒有
+#   套用：FinMind（stock_table）與富邦備用路徑（apply_rows）都在讀資料這一層套用，各引擎吃到同一份
+#   記錄：applied(sid) 這次執行是否真的套用到；上傳前據此把「沒有套用到更正的那檔」擋下（firebase_upload）
+def _corr_path() -> Path:
+    env = os.environ.get("BB_CORRECTIONS")
+    if env:
+        return Path(env)
+    for p in (DATA_DIR / "corrections.json", SEC_DIR / "corrections.json"):
+        if p.exists():
+            return p
+    return DATA_DIR / "corrections.json"
+
+
+def corrections_required() -> bool:
+    if os.environ.get("BB_ALLOW_NO_CORRECTIONS") == "1" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return os.environ.get("BB_REQUIRE_CORRECTIONS") == "1"
+    return True
+
+
+@lru_cache(maxsize=1)
+def _corrections_raw() -> tuple[list[dict], str]:
+    """(更正清單, 檔案雜湊前 12 碼)。必要時缺檔或格式錯誤 → RuntimeError（工作流程該段失敗，不照算）"""
+    import hashlib
+    import json
+    p = _corr_path()
+    if not p.exists():
+        if corrections_required():
+            raise RuntimeError(f"找不到人工更正檔 {p}：不能照算（請確認已從私人倉庫下載 corrections.json）")
+        return [], ""
+    blob = p.read_bytes()
+    try:
+        items = json.loads(blob.decode("utf-8"))
+        assert isinstance(items, list) and all(isinstance(x, dict) and x.get("stock_id") and x.get("date") for x in items)
+    except Exception as ex:  # noqa: BLE001
+        raise RuntimeError(f"人工更正檔 {p} 格式錯誤：{ex}") from ex
+    h = hashlib.sha256(blob).hexdigest()[:12]
+    log.info("人工更正檔 %s：%d 筆、版本 %s", p, len(items), h)
+    return items, h
+
+
+def corrections_hash() -> str:
+    return _corrections_raw()[1]
+
+
+def corrected_stocks() -> set[str]:
+    return {str(x["stock_id"]) for x in _corrections_raw()[0]}
+
+
+_APPLIED: dict[str, set] = {}        # 代號 → {(日期, 分點名稱)}：這次執行真的套用到的更正
+_MISSED: set[str] = set()            # 這次執行有更正卻對不到分點的股票（上傳前擋下）
+
+
+def _mark(sid: str, date: str, name: str) -> None:
+    _APPLIED.setdefault(sid, set()).add((str(date), _norm_name(name)))
+
+
+def applied(sid: str) -> bool:
+    """這檔的每一筆更正，這次執行都套用到了嗎（沒有更正的股票一律 True）"""
+    need = {(str(x["date"]), _norm_name(x.get("securities_trader", ""))) for x in _corrections_raw()[0] if str(x["stock_id"]) == sid}
+    return need <= _APPLIED.get(sid, set())
+
+
+def upload_ok(sid: str) -> bool:
+    """上傳前檢查：有更正的股票，更正檔必須已載入、而且這次沒有發生「讀到這檔卻對不到更正分點」"""
+    if sid not in corrected_stocks():
+        return True
+    return bool(corrections_hash()) and sid not in _MISSED
+
+
+def stamp(sid: str) -> dict | None:
+    """寫進輸出文件的更正紀錄（網站上可確認套用了哪一版）"""
+    if sid not in corrected_stocks():
+        return None
+    return {"version": corrections_hash(), "applied": applied(sid), "items": applied_items(sid)}
+
+
+def applied_items(sid: str) -> list[dict]:
+    return [{k: x[k] for k in ("date", "securities_trader", "buy_volume", "sell_volume", "buy_price", "sell_price") if k in x}
+            for x in _corrections_raw()[0] if str(x["stock_id"]) == sid]
 
 
 @lru_cache(maxsize=1)
 def _corrections():
-    """JSON 陣列，每筆欄位：stock_id, date, securities_trader（分點名稱，例：統一-仁愛）, securities_trader_id（可空）, buy_volume, sell_volume（股；省略＝不改）,
-    buy_price, sell_price（省略＝保留原值）, note。只改指定的那一格，不做任何推估"""
-    import json
     import pandas as pd
-    if not CORR_FILE.exists():
-        return pd.DataFrame()
-    try:
-        return pd.DataFrame(json.loads(CORR_FILE.read_text(encoding="utf-8")))
-    except Exception:  # noqa: BLE001
-        log.exception("人工更正檔讀取失敗（略過）")
-        return pd.DataFrame()
+    return pd.DataFrame(_corrections_raw()[0])
 
 
 def _norm_name(x) -> str:
     return "".join(str(x).replace("證券", "").split()).replace("-", "").replace("－", "").replace("—", "")
 
 
+def _corr_bid(sid: str, r, df=None) -> str:
+    bid = str(r.get("securities_trader_id") or "")
+    if bid in ("", "nan", "None"):
+        want = _norm_name(r.get("securities_trader", ""))       # 名稱寫法不同（統一-仁愛／統一仁愛）也對得到
+        if df is not None and len(df):
+            hit = df.loc[df["securities_trader"].astype(str).map(_norm_name) == want, "securities_trader_id"]
+            bid = str(hit.iloc[-1]) if len(hit) else ""
+        if not bid:                                              # 這檔股票從沒出現過這個分點 → 用富邦分點清單找代碼
+            bid = next((k for k, x in _fubon_ids().items() if _norm_name(x.get("broker") or x.get("name") or "") == want), "")
+    return bid
+
+
 def _apply_corrections(sid: str, df):
     import numpy as np
     import pandas as pd
-    c = _corrections()
-    if not len(c):
-        return df
-    c = c[c["stock_id"].astype(str) == sid]
-    for r in c.itertuples():
-        bid = str(getattr(r, "securities_trader_id", "") or "")
-        if bid in ("", "nan", "None"):
-            want = _norm_name(r.securities_trader)       # 名稱寫法不同（統一-仁愛／統一仁愛）也對得到
-            hit = df.loc[df["securities_trader"].astype(str).map(_norm_name) == want, "securities_trader_id"]
-            bid = str(hit.iloc[-1]) if len(hit) else ""
-            if not bid:                                  # 這檔股票從沒出現過這個分點 → 用富邦分點清單找代碼
-                bid = next((k for k, x in _fubon_ids().items() if _norm_name(x.get("broker") or x.get("name") or "") == want), "")
+    items = [x for x in _corrections_raw()[0] if str(x["stock_id"]) == sid]
+    for r in items:
+        bid = _corr_bid(sid, r, df)
         if not bid:
-            log.warning("人工更正 %s %s %s：這檔股票找不到這個分點，略過", sid, r.date, r.securities_trader)
+            log.warning("人工更正 %s %s %s：找不到這個分點的代碼（這檔不會上傳）", sid, r["date"], r.get("securities_trader"))
+            _MISSED.add(sid)
             continue
-        m = (df["securities_trader_id"].astype(str) == bid) & (df["date"].astype(str) == str(r.date))
+        m = (df["securities_trader_id"].astype(str) == bid) & (df["date"].astype(str) == str(r["date"]))
         if not m.any():
-            df = pd.concat([df, pd.DataFrame([{"securities_trader_id": bid, "securities_trader": str(r.securities_trader), "date": str(r.date),
+            df = pd.concat([df, pd.DataFrame([{"securities_trader_id": bid, "securities_trader": str(r.get("securities_trader")), "date": str(r["date"]),
                                                "buy_volume": 0.0, "sell_volume": 0.0, "buy_price": np.nan, "sell_price": np.nan}])],
                            ignore_index=True)
-            m = (df["securities_trader_id"].astype(str) == bid) & (df["date"].astype(str) == str(r.date))
+            m = (df["securities_trader_id"].astype(str) == bid) & (df["date"].astype(str) == str(r["date"]))
         for col in ("buy_volume", "sell_volume", "buy_price", "sell_price"):
-            v = getattr(r, col, np.nan)
+            v = r.get(col)
             if v is not None and pd.notna(v):
                 df.loc[m, col] = float(v)
-        log.info("人工更正 %s %s %s（%s）：買 %s 股、賣 %s 股", sid, r.date, r.securities_trader, bid,
-                 df.loc[m, "buy_volume"].iloc[0], df.loc[m, "sell_volume"].iloc[0])
+        _mark(sid, r["date"], r.get("securities_trader", ""))
+        log.info("人工更正 %s %s %s（%s）：買 %s 股、賣 %s 股（版本 %s）", sid, r["date"], r.get("securities_trader"), bid,
+                 df.loc[m, "buy_volume"].iloc[0], df.loc[m, "sell_volume"].iloc[0], corrections_hash())
     return df.sort_values(["securities_trader_id", "date"], kind="stable").reset_index(drop=True)
+
+
+def apply_rows(sid: str, name: str, key: str, rows: list[dict]) -> list[dict]:
+    """富邦備用路徑（longhist）用：rows＝[{date, buy, sell(, buy_price, sell_price)}]（張）。
+    分點以名稱或代碼對應；回傳更正後的新清單（依日期排序）"""
+    items = [x for x in _corrections_raw()[0] if str(x["stock_id"]) == sid]
+    if not items:
+        return rows
+    bid = decode_key(key or "")
+    out = {r["date"]: dict(r) for r in rows}
+    for r in items:
+        same = _norm_name(r.get("securities_trader", "")) == _norm_name(name or "") or (r.get("securities_trader_id") and str(r["securities_trader_id"]) == bid) \
+            or (_corr_bid(sid, r) and _corr_bid(sid, r) == bid)
+        if not same:
+            continue
+        d = str(r["date"])
+        x = out.setdefault(d, {"date": d, "buy": 0, "sell": 0})
+        if r.get("buy_volume") is not None:
+            x["buy"] = float(r["buy_volume"]) / LOT
+        if r.get("sell_volume") is not None:
+            x["sell"] = float(r["sell_volume"]) / LOT
+        if r.get("buy_price") is not None:
+            x["buy_price"] = float(r["buy_price"])
+        if r.get("sell_price") is not None:
+            x["sell_price"] = float(r["sell_price"])
+        _mark(sid, d, r.get("securities_trader", ""))
+        log.info("人工更正（富邦備用路徑）%s %s %s：買 %s 張、賣 %s 張（版本 %s）", sid, d, name, x["buy"], x["sell"], corrections_hash())
+    return sorted(out.values(), key=lambda r: r["date"])
 
 
 @lru_cache(maxsize=48)

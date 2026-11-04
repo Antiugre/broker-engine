@@ -68,7 +68,8 @@ def branch_sources(sid: str, d):
         cache = quant._read(f) or {}
         if not cache.get("rows"):
             continue
-        df = pd.DataFrame(cache["rows"])
+        import fm_store                         # 富邦備用路徑也套用人工更正
+        df = pd.DataFrame(fm_store.apply_rows(sid, cache.get("broker") or "", f.stem, cache["rows"]))
         if not df.empty:
             out.append((f.stem, cache.get("broker") or "", df))
     return out

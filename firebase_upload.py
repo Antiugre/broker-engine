@@ -265,6 +265,14 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
         raise FileNotFoundError(f"data/{date}/ 沒有可上傳的資料")
 
     docs: dict[str, dict] = {}
+    # 人工更正安全閘（fm_store）：更正檔沒載入 → 直接失敗；有更正的股票這次對不到更正 → 那檔不上傳（不蓋掉網站上正確的結果）
+    import fm_store
+    corr = fm_store.corrected_stocks()
+    blocked = {s for s in corr if not fm_store.upload_ok(s)}
+    for s in sorted(blocked):
+        log.warning("人工更正：%s 這次沒有套用到更正，不上傳這檔的 Hit Ratio／Expectancy／Order Flow／本土主力", s)
+    keep = lambda d: {k: v for k, v in (d or {}).items() if k not in blocked}  # noqa: E731
+    keep_items = lambda xs: [x for x in (xs or []) if str(x.get("stock_id")) not in blocked]  # noqa: E731
     # hist
     hist_items = {sid: h for sid, rec in records.items() if (h := pack_history(sid, rec))}
     hist_index = {}
@@ -291,14 +299,14 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
     if qf.exists():
         q = json.loads(qf.read_text(encoding="utf-8"))
         for h, hq in horizons_of(q).items():
-            items = hq.get("signals", [])[:300]
+            items = keep_items(hq.get("signals", []))[:300]
             sig = {"date": date, "horizon": h, "schema": SCHEMA, "count": len(items), "items": items,
                    "params": q.get("params", {}), "updated": q.get("updated")}
             if is_latest:
                 docs.update(payload_docs(f"quant/latest@{h}", {
                     "date": date, "horizon": h, "schema": SCHEMA, "params": q.get("params", {}),
                     "rdates": hq.get("rdates", [])},  # 近 180 交易日（網頁自訂「近 N 日」用）
-                    hq.get("stocks", {})))
+                    keep(hq.get("stocks", {}))))
                 docs[f"signals/latest@{h}"] = sig
             docs[f"signals/{date}@{h}"] = sig  # 每日存檔，日後可回測訊號的後續表現
 
@@ -308,10 +316,10 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
         e = json.loads(ef.read_text(encoding="utf-8"))
         for h, he in horizons_of(e).items():
             lists = {"date": date, "horizon": h, "schema": SCHEMA, "params": e.get("params", {}), "prior": he.get("prior", {}),
-                     "signals": he.get("signals", [])[:200], "stealth": he.get("stealth", [])[:200],
-                     "loaded": he.get("loaded", [])[:200], "updated": e.get("updated")}
+                     "signals": keep_items(he.get("signals", []))[:200], "stealth": keep_items(he.get("stealth", []))[:200],
+                     "loaded": keep_items(he.get("loaded", []))[:200], "updated": e.get("updated")}
             if is_latest:
-                docs.update(payload_docs(f"edge/latest@{h}", {"date": date, "horizon": h, "schema": SCHEMA}, he.get("stocks", {})))
+                docs.update(payload_docs(f"edge/latest@{h}", {"date": date, "horizon": h, "schema": SCHEMA}, keep(he.get("stocks", {}))))
                 docs[f"edge/signals@{h}"] = lists
             docs[f"edge_hist/{date}@{h}"] = lists
 
@@ -320,17 +328,31 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
     if fdir.exists() and is_latest:
         for f in sorted(fdir.glob("*.json")):
             doc_id = f.stem  # "2330@1y" 或 "_index@1y"
-            docs[f"flow/{doc_id}"] = json.loads(f.read_text(encoding="utf-8"))
+            sid = doc_id.split("@")[0]
+            if sid in blocked:
+                continue
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if (st := fm_store.stamp(sid)):
+                d["corrections"] = st          # 套用了哪一版人工更正（網站 Order Flow 會顯示）
+            docs[f"flow/{doc_id}"] = d
 
     # 本土主力（mainforce.py）：每檔一份 force/{代號}（Ultra 限定）
     mdir = DATA_DIR / "force" / date
     if mdir.exists() and is_latest:
         for f in sorted(mdir.glob("*.json")):
-            docs[f"force/{f.stem}"] = json.loads(f.read_text(encoding="utf-8"))
+            if f.stem in blocked:
+                continue
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if (st := fm_store.stamp(f.stem)):
+                d["corrections"] = st
+            docs[f"force/{f.stem}"] = d
     # 中小型吃貨（smallcap.py）：今天的訊號＋回測摘要，一份 smallcap/latest（Ultra 限定）
     sfile = DATA_DIR / "smallcap" / f"{date}.json"
     if sfile.exists() and is_latest:
-        docs["smallcap/latest"] = json.loads(sfile.read_text(encoding="utf-8"))
+        d = json.loads(sfile.read_text(encoding="utf-8"))
+        if blocked and isinstance(d.get("signals"), list):
+            d["signals"] = keep_items(d["signals"])
+        docs["smallcap/latest"] = d
 
     # 主力集團偵測（broker_flow，測試版，管理員限定）：每檔一份 syndicate/{代號} ＋ syndicate/_index
     bdir = DATA_DIR / "broker_flow"
@@ -338,7 +360,7 @@ def build_documents(date: str, stocks: list[str] | None = None, prev_meta: dict 
         idx = []
         for f in sorted(bdir.glob("*/summary.json")):
             d = json.loads(f.read_text(encoding="utf-8"))
-            if d.get("asof") == date:
+            if d.get("asof") == date and d["stock_id"] not in blocked:
                 docs[f"syndicate/{d['stock_id']}"] = d
             idx.append({"id": d["stock_id"], "name": d.get("stock_name") or "", "asof": d.get("asof"), "kind": d.get("kind", "stock")})
         if idx:
