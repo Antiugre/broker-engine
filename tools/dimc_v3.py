@@ -105,7 +105,7 @@ def windows(d: Path) -> int:
                 log.warning("窗口 %s：擬合週 %s 的擬合還沒齊（%d/%d），略過", end, fw, len(fits), 1 + int(P.dim_c.null_cp))
                 continue
         s = time.time()
-        res = dim_c.window_c(mk, end, fits)
+        res = dim_c.window_c(mk, end, fits, set(P.governance.dev_stocks))   # 觀測只算開發集；虛無照常用全市場
         if res:
             dim_c.save(res, d / "windows" / f"dimc_{end}.pkl")
             done += 1
