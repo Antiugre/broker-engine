@@ -165,3 +165,26 @@ def range_top(sid: str, start: str, end: str, n: int = 15) -> dict | None:
     return {"stock_id": sid, "date": end, "unit": "張", "source": "finmind",
             "buy_side": rows(g[g["net"] > 0].nlargest(n, "net")), "sell_side": rows(g[g["net"] < 0].nsmallest(n, "net")),
             "query_date": end, "range": {"start": start, "end": end}}
+
+
+TDR_DIR = FM_DIR / "TDR"     # 分點價位明細（私人倉庫 TDR-by-stock：hist-<代號>.parquet＋cur.parquet）
+
+
+@lru_cache(maxsize=8)
+def tdr(sid: str):
+    """一檔股票的分點價位明細：date, securities_trader_id, price, buy, sell（股）。沒有資料 → 空表"""
+    import pandas as pd
+    import pyarrow.dataset as ds
+    cols = ["date", "securities_trader_id", "price", "buy", "sell"]
+    parts = []
+    f = TDR_DIR / f"hist-{sid}.parquet"
+    if f.exists():
+        parts.append(ds.dataset(f, format="parquet").to_table(columns=cols).to_pandas())
+    c = TDR_DIR / "cur.parquet"
+    if c.exists():
+        t = ds.dataset(c, format="parquet").to_table(columns=cols, filter=ds.field("stock_id") == sid)
+        if t.num_rows:
+            parts.append(t.to_pandas())
+    if not parts:
+        return pd.DataFrame(columns=cols)
+    return pd.concat(parts, ignore_index=True)
