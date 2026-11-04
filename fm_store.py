@@ -122,6 +122,15 @@ def corrections_hash() -> str:
     return _corrections_raw()[1]
 
 
+_PUBLIC_KEYS = ("stock_id", "date", "securities_trader", "securities_trader_id", "broker_id",
+                "buy_volume", "buy_price", "sell_volume", "sell_price")
+
+
+def public_corrections(items: list) -> list:
+    """給所有使用者看的版本：只留股票、日期、分點、張數、價格（不含備註）"""
+    return [{k: x[k] for k in _PUBLIC_KEYS if k in x} for x in items]
+
+
 def corrected_stocks() -> set[str]:
     return {str(x["stock_id"]) for x in _corrections_raw()[0]}
 
