@@ -178,7 +178,7 @@ def analyze_stock(sid: str, *, pn=None, pr: prep.Prep | None = None, events=None
             continue
         th = thresholds(n, act, sa, pn.close, pn.volume)
         diag.append([str(pn.branches[i]), str(pn.names[i]), na, int(th["G_eff"]), round(float(th["volume_share"]), 6),
-                     int(th["cycles"]), bool(th["eligible"])])
+                     int(th["cycles"]), bool(th["eligible"]), i])
         if not th["eligible"]:
             continue
         bt = branch_test(n, act, sa)
@@ -189,10 +189,11 @@ def analyze_stock(sid: str, *, pn=None, pr: prep.Prep | None = None, events=None
         st[i] = {"eps": bt["eps"], "ntil": bt["ntil"], "theta_E": bt["E"]["theta"], "h_star_idx": bt["E"]["h_star_idx"]}
     # 描述欄位需要 v3 會計層（S 批分配依全部分點，所以在完整面板上算一次，只保留通過門檻的分點）
     L = None
-    if keep:
+    if keep or diag:
         from broker_flow_v3 import accounting
         Lf = accounting.run(pn, events=events, Q=Q)
-        L = {k: (v[keep] if isinstance(v, np.ndarray) and v.ndim == 2 else v) for k, v in Lf.items()}
+        L = {k: (v[keep] if isinstance(v, np.ndarray) and v.ndim == 2 else v) for k, v in Lf.items()} if keep else None
+        diag = [d[:7] + [diag_money(pn, Lf, d[7])] for d in diag]   # 分點查詢：用分點真實買進／賣出均價算的損益
     sub = dataclasses.replace(pn, branches=[pn.branches[i] for i in keep], names=[pn.names[i] for i in keep],
                               btype=[pn.btype[i] for i in keep], B=pn.B[keep], S=pn.S[keep], BP=pn.BP[keep], SP=pn.SP[keep]) if keep else None
     state = {"sid": sid, "sub": sub, "keep": keep, "L": L, "sa": sa, "branch": st, "split": split_label,
@@ -357,17 +358,40 @@ def finalize_stock(res: dict, stock_name: str = "", asof: str | None = None, wri
 DIAG_MIN_ACTIVE = 10
 
 
+def diag_money(pn, Lf: dict, i: int) -> list:
+    """分點查詢的損益欄位（全期間、到最新一日）：買進均價、賣出均價（分點當日真實成交均價，依張數加權）、買進／賣出張數、
+    總損益＝已實現＋當沖＋期末未實現（v3 會計層，同「1 檢定結果」的總損益）、已實現、未實現、完成來回數、來回勝率。
+    沒有真實價格的日子（富邦備用路徑）不計入均價"""
+    t = len(pn.dates) - 1
+    cl = np.asarray(pn.close, float)
+    ok = np.flatnonzero(np.isfinite(cl) & (cl > 0))
+    close = float(cl[ok[-1]]) if len(ok) else np.nan
+
+    def avg(q, p):
+        q = np.asarray(q, float); p = np.asarray(p, float)
+        m = (q > 0) & np.isfinite(p) & (p > 0)
+        return _r(float((q[m] * p[m]).sum() / q[m].sum()), 2) if m.any() else None
+    try:
+        pl = report.pnl(Lf, i, t, close) if np.isfinite(close) else {}
+    except Exception:  # noqa: BLE001
+        pl = {}
+    return [avg(pn.B[i], pn.BP[i]), avg(pn.S[i], pn.SP[i]), round(float(np.nansum(pn.B[i])) / 1000, 1), round(float(np.nansum(pn.S[i])) / 1000, 1),
+            pl.get("total"), pl.get("realized"), pl.get("unrealized"), pl.get("round_trips"), pl.get("win_rate")]
+
+
 def build_diag(res: dict) -> dict:
     """網站「3 分點查詢」：活躍日 ≥ 10 的分點的 §6.1 各門檻；通過門檻者附 p、q（不論是否顯著）。只供查詢，不是訊號"""
     pq = {str(r["branch"]): r for r in res["rows"]}
     rows = []
-    for b, name, na, g, v, c, ok in res.get("diag") or []:
+    for b, name, na, g, v, c, ok, *money in res.get("diag") or []:
         r = pq.get(b)
+        money = (money[0] if money else None) or [None] * 9
         w = _web_ids(b, name)                                  # 系統格式名稱（富邦-二林）與富邦代碼，網站點選查詢用
         rows.append([b, w.get("name", name), na, g, v, c, ok] + ([_f3(r["pE"]), _f3(r.get("qE")), _f3(r["pR"]), _f3(r.get("qR"))] if r else [None] * 4)
-                    + [w.get("broker_id"), w.get("b_raw")])
+                    + [w.get("broker_id"), w.get("b_raw")] + list(money))
     rows.sort(key=lambda x: (not x[6], -x[2]))
-    return {"cols": ["branch", "name", "active_days", "G_eff", "volume_share", "cycles", "eligible", "pE", "qE", "pR", "qR", "broker_id", "b_raw"],
+    return {"cols": ["branch", "name", "active_days", "G_eff", "volume_share", "cycles", "eligible", "pE", "qE", "pR", "qR", "broker_id", "b_raw",
+                     "avg_buy", "avg_sell", "buy_lots", "sell_lots", "pnl_total", "realized", "unrealized", "round_trips", "win_rate"],
             "min": {"active_days": int(TP.min_active_days), "G_eff": int(TP.min_geff), "volume_share": float(TP.min_volume_share),
                     "cycles": int(TP.min_cycles)}, "rows": rows}
 
