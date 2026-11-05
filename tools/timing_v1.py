@@ -47,6 +47,9 @@ def main() -> int:
         items.append(("syndicate/_index@timing", {"stock_id": "_index", "kind": "timing", "version": d["version"], "stocks": [
             {"id": x["stock_id"], "name": x.get("stock_name") or "", "asof": x["asof"], "split": x.get("split"),
              "types": (x.get("summary") or {}).get("types")} for x in docs]}))
+        # Ultra 測試版（2026-11-05 擁有者決定；Ultra 帳號都是擁有者本人的測試帳號）：同一份結果另寫到 edge/（Ultra 可讀）。
+        #   驗證結果 _validation 仍只寫 syndicate/（管理員限定）
+        items += [(k.replace("syndicate/", "edge/", 1), v) for k, v in items]
         _commit(get_client(), items, label="timing")
         log.info("擇時 已上傳：%s", d["stock_id"])
 
