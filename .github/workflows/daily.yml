@@ -262,7 +262,8 @@ jobs:
       - name: 合併 ② ③ 的資料（同一個檔案取較新的版本）→ 更新長期資料快取
         run: |
           [ -f se/state.tar ] && tar -xf se/state.tar
-          [ -f sf/state.tar ] && tar --keep-newer-files -xf sf/state.tar
+          # tar --keep-newer-files 遇到已存在的目錄會報「Unexpected inconsistency」並 exit 2 → 先解到暫存，再只覆蓋較新的檔案
+          if [ -f sf/state.tar ]; then mkdir -p "$RUNNER_TEMP/sf" && tar -xf sf/state.tar -C "$RUNNER_TEMP/sf" && rsync -a --update "$RUNNER_TEMP/sf/" ./; fi
           test -d data
           python tools/cache_bundle.py pack --out data_cache.tar.gz
           gh release view cache >/dev/null 2>&1 || gh release create cache --title "data cache" --notes "長期資料快取（自動更新）" --prerelease
