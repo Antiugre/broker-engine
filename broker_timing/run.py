@@ -363,9 +363,11 @@ def build_diag(res: dict) -> dict:
     rows = []
     for b, name, na, g, v, c, ok in res.get("diag") or []:
         r = pq.get(b)
-        rows.append([b, name, na, g, v, c, ok] + ([_f3(r["pE"]), _f3(r.get("qE")), _f3(r["pR"]), _f3(r.get("qR"))] if r else [None] * 4))
+        w = _web_ids(b, name)                                  # 系統格式名稱（富邦-二林）與富邦代碼，網站點選查詢用
+        rows.append([b, w.get("name", name), na, g, v, c, ok] + ([_f3(r["pE"]), _f3(r.get("qE")), _f3(r["pR"]), _f3(r.get("qR"))] if r else [None] * 4)
+                    + [w.get("broker_id"), w.get("b_raw")])
     rows.sort(key=lambda x: (not x[6], -x[2]))
-    return {"cols": ["branch", "name", "active_days", "G_eff", "volume_share", "cycles", "eligible", "pE", "qE", "pR", "qR"],
+    return {"cols": ["branch", "name", "active_days", "G_eff", "volume_share", "cycles", "eligible", "pE", "qE", "pR", "qR", "broker_id", "b_raw"],
             "min": {"active_days": int(TP.min_active_days), "G_eff": int(TP.min_geff), "volume_share": float(TP.min_volume_share),
                     "cycles": int(TP.min_cycles)}, "rows": rows}
 
@@ -375,7 +377,7 @@ def _web_ids(bid: str, name: str) -> dict:
     try:
         import fm_store
         x = fm_store.fubon_row(str(bid), str(name))
-        return {"broker_id": x["broker_id"], "b_raw": x["b_raw"]}
+        return {"name": x.get("broker") or name, "broker_id": x["broker_id"], "b_raw": x["b_raw"]}   # 名稱用系統格式（富邦-二林）
     except Exception:  # noqa: BLE001
         return {}
 
