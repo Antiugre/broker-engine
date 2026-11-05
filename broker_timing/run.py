@@ -376,7 +376,26 @@ def diag_money(pn, Lf: dict, i: int) -> list:
     except Exception:  # noqa: BLE001
         pl = {}
     return [avg(pn.B[i], pn.BP[i]), avg(pn.S[i], pn.SP[i]), round(float(np.nansum(pn.B[i])) / 1000, 1), round(float(np.nansum(pn.S[i])) / 1000, 1),
-            pl.get("total"), pl.get("realized"), pl.get("unrealized"), pl.get("round_trips"), pl.get("win_rate")]
+            pl.get("total"), pl.get("realized"), pl.get("unrealized"), pl.get("round_trips"), pl.get("win_rate")] + window_pnl(Lf, i, cl)
+
+
+PNL_WINDOWS = (20, 60, 120, 250, 500)        # 網站「3 分點查詢」可選的區間（交易日）：近 1 月、3 月、半年、1 年、2 年
+
+
+def window_pnl(L: dict, i: int, cl) -> list:
+    """區間獲利（逐日市值法，同總損益的定義）：W(τ) = 累計已實現 + 累計當沖 + τ 日收盤計的未實現；
+    區間 [t−w+1, t] 的獲利 = W(t) − W(t−w)。全期間（期初無部位）時 W(t) 就是總損益。收盤缺值往前補"""
+    c = np.asarray(cl, float).copy()
+    c[~(np.isfinite(c) & (c > 0))] = np.nan
+    for k in range(1, len(c)):
+        if np.isnan(c[k]):
+            c[k] = c[k - 1]
+    c = np.nan_to_num(c, nan=0.0)
+    cum = np.cumsum(np.asarray(L["realized"][i], float) + np.asarray(L["dt_pnl"][i], float))
+    W = cum + np.asarray(L["inventory"][i], float) * (c - np.asarray(L["avg_cost"][i], float)) \
+        + np.asarray(L["short_inv"][i], float) * (np.asarray(L["short_cost"][i], float) - c)
+    t = len(W) - 1
+    return [round(float(W[t] - (W[t - w] if t - w >= 0 else 0.0))) for w in PNL_WINDOWS]
 
 
 def build_diag(res: dict) -> dict:
@@ -385,13 +404,14 @@ def build_diag(res: dict) -> dict:
     rows = []
     for b, name, na, g, v, c, ok, *money in res.get("diag") or []:
         r = pq.get(b)
-        money = (money[0] if money else None) or [None] * 9
+        money = (money[0] if money else None) or [None] * (9 + len(PNL_WINDOWS))
         w = _web_ids(b, name)                                  # 系統格式名稱（富邦-二林）與富邦代碼，網站點選查詢用
         rows.append([b, w.get("name", name), na, g, v, c, ok] + ([_f3(r["pE"]), _f3(r.get("qE")), _f3(r["pR"]), _f3(r.get("qR"))] if r else [None] * 4)
                     + [w.get("broker_id"), w.get("b_raw")] + list(money))
-    rows.sort(key=lambda x: (not x[6], -x[2]))
+    rows.sort(key=lambda x: -(x[17] if x[17] is not None else -1e18))   # 獲利最高排第一
     return {"cols": ["branch", "name", "active_days", "G_eff", "volume_share", "cycles", "eligible", "pE", "qE", "pR", "qR", "broker_id", "b_raw",
-                     "avg_buy", "avg_sell", "buy_lots", "sell_lots", "pnl_total", "realized", "unrealized", "round_trips", "win_rate"],
+                     "avg_buy", "avg_sell", "buy_lots", "sell_lots", "pnl_total", "realized", "unrealized", "round_trips", "win_rate"]
+                    + [f"pnl_{w}" for w in PNL_WINDOWS],
             "min": {"active_days": int(TP.min_active_days), "G_eff": int(TP.min_geff), "volume_share": float(TP.min_volume_share),
                     "cycles": int(TP.min_cycles)}, "rows": rows}
 
